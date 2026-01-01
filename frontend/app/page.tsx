@@ -8,7 +8,7 @@ const TRANSLATIONS = {
   de: {
     title: "Deal Anwalt",
     subtitle: "Zahle nie wieder zu viel für dein Traumauto.",
-    placeholder: "Mobile.de Link hier einfügen...",
+    placeholder: "Link hier einfügen...",
     button: "Kostenlos Checken",
     loading: "Analysiere Marktdaten...",
     resultTitle: "Analyse Ergebnis",
@@ -27,7 +27,7 @@ const TRANSLATIONS = {
   en: {
     title: "Deal Lawyer",
     subtitle: "Never overpay for your dream car again.",
-    placeholder: "Paste Mobile.de link here...",
+    placeholder: "Paste link here...",
     button: "Check for Free",
     loading: "Analyzing market data...",
     resultTitle: "Analysis Result",
