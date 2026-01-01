@@ -56,9 +56,17 @@ export default function Home() {
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
   const analyzeCar = async () => {
-    if (!url.includes("mobile.de")) {
-      setError(lang === "de" ? "Bitte einen gültigen Mobile.de Link eingeben." : "Please enter a valid Mobile.de link.");
-      return;
+    // Neuer, lockerer Check: Erlaubt Mobile, AutoScout und Kleinanzeigen
+    const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
+    const isValid = validDomains.some(domain => url.toLowerCase().includes(domain));
+
+    if (!isValid && url.length > 0) { // Einfacher Check
+       // Optional: Wir können den Check auch ganz entfernen und alles durchlassen
+       // Aber für UX ist ein Hinweis gut:
+       setError(lang === "de" 
+         ? "Bitte einen Link von Mobile.de, AutoScout24 oder Kleinanzeigen nutzen." 
+         : "Please use a link from Mobile.de, AutoScout24, or Kleinanzeigen.");
+       return;
     }
     
     setLoading(true);
