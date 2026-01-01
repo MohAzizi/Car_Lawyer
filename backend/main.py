@@ -15,7 +15,6 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS Konfiguration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,33 +23,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ENVIRONMENT VARIABLES ---
+# --- CONFIG ---
 SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Supabase Client
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     print("✅ Supabase Client initialisiert")
 except Exception as e:
     print(f"❌ Supabase Error: {e}")
 
+# UPDATE: Wir akzeptieren jetzt auch die Sprache "lang"
 class CarRequest(BaseModel):
     url: str
-
-# --- HILFSFUNKTIONEN ---
-
-def clean_number(text):
-    """Extrahiert Zahlen aus Text (z.B. '29.999 €' -> 29999)"""
-    if not text: return 0
-    # Entferne alles außer Zahlen
-    num = re.sub(r'[^\d]', '', text)
-    return int(num) if num else 0
+    lang: str = "de" 
 
 def extract_metadata(soup):
-    """Holt Titel, Beschreibung und Bild aus den Meta-Tags (Universal für alle Seiten)"""
     og_title = soup.find('meta', property='og:title')
     og_desc = soup.find('meta', property='og:description')
     og_image = soup.find('meta', property='og:image')
@@ -61,117 +51,97 @@ def extract_metadata(soup):
         "image": og_image['content'] if og_image else None
     }
 
-@app.get("/")
-def read_root():
-    return {"status": "Deal Anwalt Backend v2 (Multi-Platform) is running 🚀"}
-
 @app.post("/analyze")
 def analyze_car(request: CarRequest):
-    print(f"🔎 Analysiere: {request.url}")
+    print(f"🔎 Analysiere ({request.lang}): {request.url}")
     
-    # 1. SCRAPING (Universal via ScrapingBee)
     params = {
         'api_key': SCRAPINGBEE_API_KEY,
         'url': request.url,
-        'render_js': 'True', # Wichtig für AutoScout & Mobile
-        'premium_proxy': 'True', # Hilft gegen Blockaden
+        'render_js': 'True', 
+        'premium_proxy': 'True',
         'country_code': 'de',
         'wait_browser': 'networkidle2' 
     }
 
     try:
         response = requests.get('https://app.scrapingbee.com/api/v1/', params=params)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Scraping fehlgeschlagen (Seite blockiert oder nicht erreichbar)")
-            
         soup = BeautifulSoup(response.content, 'html.parser')
         meta = extract_metadata(soup)
         
         title = meta['title']
         desc_text = meta['desc']
         image_url = meta['image']
-        
-        # Zusätzlich den ganzen sichtbaren Text holen für die Ausstattungs-Analyse
-        # Wir nehmen nur die wichtigsten Textblöcke, um Token zu sparen
         body_text = soup.get_text(separator=' ', strip=True)[:4000] 
+        full_text = title + " " + desc_text
 
-        # 2. DATEN EXTRAKTION (Intelligenter Regex für alle Plattformen)
+        # --- 1. INTELLIGENTERES PARSING (FIX FÜR AUTOSCOUT) ---
         
-        # PREIS FINDEN
+        # PREIS: Suche nach "€ 12.345" ODER "12.345 €"
         price = 0
-        # Sucht nach Preis im Titel oder Description (Format: 12.345 €)
-        price_match = re.search(r'(\d{1,3}(?:\.\d{3})*)\s*(?:€|EUR|Euro)', title + " " + desc_text)
-        if price_match:
-            price = int(price_match.group(1).replace('.', ''))
+        # Muster 1: 48.970 €
+        match_1 = re.search(r'(\d{1,3}(?:\.\d{3})*)\s*(?:€|EUR)', full_text)
+        # Muster 2: € 48.970 (AutoScout Style)
+        match_2 = re.search(r'(?:€|EUR)\s*(\d{1,3}(?:\.\d{3})*)', full_text)
         
-        # KM FINDEN
+        if match_1:
+            price = int(match_1.group(1).replace('.', ''))
+        elif match_2:
+            price = int(match_2.group(1).replace('.', ''))
+        
+        # KM: Suche nach "km"
         km = 0
-        # Sucht nach "km" oder "Laufleistung"
-        km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*(?:km)', title + " " + desc_text, re.IGNORECASE)
+        km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*(?:km)', full_text, re.IGNORECASE)
         if km_match:
             km = int(km_match.group(1).replace('.', ''))
             
-        # BAUJAHR / EZ FINDEN
+        # EZ: Suche Datum MM/YYYY
         ez_string = "Unbekannt"
-        # Sucht nach Datum Format MM/YYYY
-        ez_match = re.search(r'(\d{2}/\d{4})', title + " " + desc_text)
+        ez_match = re.search(r'(\d{2}/\d{4})', full_text)
         if ez_match:
             ez_string = ez_match.group(1)
 
-        # 3. MATHE & LOGIK
+        # Mathe
         current_year = datetime.now().year
         car_year = current_year
         if ez_string != "Unbekannt":
             try: car_year = int(ez_string.split('/')[1])
             except: pass
-        
         age = current_year - car_year
         if age == 0: age = 1
         km_per_year = int(km / age) if km > 0 else 0
 
-        # Antriebsart raten
-        fuel_type = "Unbekannt"
-        full_text_lower = (title + desc_text).lower()
-        if "diesel" in full_text_lower: fuel_type = "Diesel"
-        elif "hybrid" in full_text_lower: fuel_type = "Hybrid"
-        elif "elektro" in full_text_lower: fuel_type = "Elektro"
-        elif "benzin" in full_text_lower: fuel_type = "Benzin"
-
-        # 4. KI ANALYSE (Das Gehirn v3 - Jetzt mit Ausstattung!)
+        # --- 2. KI ANALYSE (MIT SPRACHE & AUSSTATTUNG) ---
         client = OpenAI(api_key=OPENAI_API_KEY)
         
-        system_instruction = """
-        Du bist ein knallharter Profi-Autohändler. Dein Ziel: Den Preis verhandeln.
-        Bewerte das Auto basierend auf:
-        1. Harten Fakten (KM, Alter, Preis)
-        2. Ausstattung (Fehlt wichtiges? Ist es "Volle Hütte"?).
+        # Sprache setzen
+        lang_instruction = "Antworte auf DEUTSCH." if request.lang == 'de' else "Answer in ENGLISH."
         
-        Sei kritisch. Ein "nackter" 5er BMW ohne Leder/Navi ist schwer verkäuflich -> Preis drücken.
-        Ein Auto mit seltener Top-Ausstattung (z.B. Standheizung, Pano, M-Paket) rechtfertigt höheren Preis.
+        system_instruction = f"""
+        Du bist ein Auto-Experte. {lang_instruction}
+        Dein Ziel: Preis drücken für den Käufer. Sei kritisch aber fair.
         """
 
         user_prompt = f"""
-        Fahrzeugdaten:
-        - Titel: {title}
-        - Preis: {price} EUR
-        - KM: {km} (Ø {km_per_year} km/Jahr)
-        - EZ: {ez_string}
-        - Typ: {fuel_type}
-        
-        Auszug aus Beschreibung (suche hier nach Ausstattung!): 
-        "{desc_text} ... {body_text[:500]}"
+        Fahrzeug: {title}
+        Preis: {price} EUR
+        KM: {km}
+        EZ: {ez_string}
+        Beschreibung: "{desc_text}... {body_text[:600]}"
 
-        Aufgaben:
-        1. Analysiere die KM-Leistung (Standuhr vs. Langstrecke).
-        2. CHECK DIE AUSSTATTUNG: Erwähne explizit fehlende oder besonders gute Ausstattung in den Argumenten.
-        3. Schätze einen realistischen Händler-Einkaufspreis.
+        Aufgabe:
+        1. Analysiere Preis/Leistung.
+        2. WICHTIG: Suche im Text nach Ausstattung (Leder, Navi, Schiebedach, LED, etc.).
+           - Wenn viel fehlt -> Nutze das als Argument um den Preis zu drücken ("Nackte Basis").
+           - Wenn viel da ist -> Erwähne es positiv, aber suche trotzdem Mängel (Verschleiß).
+        3. Erstelle 3 knackige Verhandlungs-Argumente für den KÄUFER.
         
-        Antworte NUR JSON:
+        Antworte JSON:
         {{
-            "market_price_estimate": 12345,
-            "rating": "teuer/fair/gut",
-            "arguments": ["Argument 1 (Technik/KM)", "Argument 2 (Ausstattung/Zustand)", "Argument 3 (Marktlage)"],
-            "script": "Direkter Verhandlungssatz..."
+            "market_price_estimate": (int),
+            "rating": "teuer/fair/good_deal",
+            "arguments": ["Arg1", "Arg2", "Arg3"],
+            "script": "Ein direkter Satz an den Verkäufer"
         }}
         """
 
@@ -185,55 +155,36 @@ def analyze_car(request: CarRequest):
                 response_format={ "type": "json_object" }
             )
             ai_result = json.loads(completion.choices[0].message.content)
-        except Exception as e:
-            print(f"KI Error: {e}")
-            # Fallback falls KI versagt
-            ai_result = {
-                "market_price_estimate": int(price * 0.9),
-                "rating": "fair",
-                "arguments": ["Konnte Details nicht lesen, aber Preis prüfen.", "Allgemeiner Marktvergleich."],
-                "script": "Was ist der letzte Preis?"
-            }
+        except:
+            ai_result = {}
 
-        # 5. DB SPEICHERUNG
+        # Fallback Werte
+        est_price = ai_result.get("market_price_estimate", int(price * 0.95))
+        if est_price == 0: est_price = price # Vermeide 0€ Schätzung
+
+        # DB Save
         try:
-            safe_market = int(ai_result.get("market_price_estimate", price))
-            data_to_save = {
+            supabase.table("scans").insert({
                 "url": str(request.url),
                 "title": str(title),
-                "image_url": str(image_url) if image_url else None,
                 "price": int(price),
-                "km": int(km),
-                "ez": str(ez_string),
-                "rating": str(ai_result.get("rating", "fair")),
-                "ai_market_estimate": safe_market,
-                "ai_potential": int(price - safe_market)
-            }
-            supabase.table("scans").insert(data_to_save).execute()
-        except Exception as e:
-            print(f"DB Save Error: {e}")
+                "ai_market_estimate": int(est_price),
+                "rating": str(ai_result.get("rating", "fair"))
+            }).execute()
+        except: pass
 
         return {
-            "meta": {
-                "title": title,
-                "url": request.url,
-                "image": image_url
-            },
-            "data": {
-                "price": price,
-                "km": km,
-                "ez": ez_string,
-                "power": "N/A" # Schwer generisch zu parsen, egal für MVP
-            },
+            "meta": { "title": title, "url": request.url, "image": image_url },
+            "data": { "price": price, "km": km, "ez": ez_string },
             "analysis": {
-                "market_price_estimate": ai_result.get("market_price_estimate", price),
+                "market_price_estimate": est_price,
                 "rating": ai_result.get("rating", "fair"),
-                "negotiation_potential": price - ai_result.get("market_price_estimate", price),
-                "arguments": ai_result.get("arguments", []),
+                "negotiation_potential": price - est_price,
+                "arguments": ai_result.get("arguments", ["Daten unklar", "Preis prüfen"]),
                 "script": ai_result.get("script", "")
             }
         }
 
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        print(f"ERROR: {e}")
         raise HTTPException(status_code=500, detail=str(e))
