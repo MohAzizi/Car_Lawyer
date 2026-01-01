@@ -35,7 +35,6 @@ try:
 except Exception as e:
     print(f"❌ Supabase Error: {e}")
 
-# UPDATE: Wir akzeptieren jetzt auch die Sprache "lang"
 class CarRequest(BaseModel):
     url: str
     lang: str = "de" 
@@ -72,76 +71,72 @@ def analyze_car(request: CarRequest):
         title = meta['title']
         desc_text = meta['desc']
         image_url = meta['image']
-        body_text = soup.get_text(separator=' ', strip=True)[:4000] 
-        full_text = title + " " + desc_text
-
-        # --- 1. INTELLIGENTERES PARSING (FIX FÜR AUTOSCOUT) ---
         
-        # PREIS: Suche nach "€ 12.345" ODER "12.345 €"
+        # NEU: Wir holen viel mehr Text (15.000 Zeichen), um auch Ausstattung weit unten zu finden
+        # Wir priorisieren den "Body", um Header/Footer Müll zu vermeiden
+        raw_body = soup.body.get_text(separator=' ', strip=True) if soup.body else soup.get_text(separator=' ', strip=True)
+        
+        # Trick: Wir suchen nach "Ausstattung" im Text und schneiden den Teil aus
+        relevant_text = raw_body[:15000] 
+        
+        full_text = title + " " + desc_text + " " + relevant_text
+
+        # --- PARSING (Preise & KM) ---
         price = 0
-        # Muster 1: 48.970 €
         match_1 = re.search(r'(\d{1,3}(?:\.\d{3})*)\s*(?:€|EUR)', full_text)
-        # Muster 2: € 48.970 (AutoScout Style)
         match_2 = re.search(r'(?:€|EUR)\s*(\d{1,3}(?:\.\d{3})*)', full_text)
         
-        if match_1:
-            price = int(match_1.group(1).replace('.', ''))
-        elif match_2:
-            price = int(match_2.group(1).replace('.', ''))
+        if match_1: price = int(match_1.group(1).replace('.', ''))
+        elif match_2: price = int(match_2.group(1).replace('.', ''))
         
-        # KM: Suche nach "km"
         km = 0
         km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*(?:km)', full_text, re.IGNORECASE)
-        if km_match:
-            km = int(km_match.group(1).replace('.', ''))
+        if km_match: km = int(km_match.group(1).replace('.', ''))
             
-        # EZ: Suche Datum MM/YYYY
         ez_string = "Unbekannt"
         ez_match = re.search(r'(\d{2}/\d{4})', full_text)
-        if ez_match:
-            ez_string = ez_match.group(1)
+        if ez_match: ez_string = ez_match.group(1)
 
-        # Mathe
-        current_year = datetime.now().year
-        car_year = current_year
-        if ez_string != "Unbekannt":
-            try: car_year = int(ez_string.split('/')[1])
-            except: pass
-        age = current_year - car_year
-        if age == 0: age = 1
-        km_per_year = int(km / age) if km > 0 else 0
-
-        # --- 2. KI ANALYSE (MIT SPRACHE & AUSSTATTUNG) ---
+        # --- KI ANALYSE ---
         client = OpenAI(api_key=OPENAI_API_KEY)
         
-        # Sprache setzen
-        lang_instruction = "Antworte auf DEUTSCH." if request.lang == 'de' else "Answer in ENGLISH."
+        # NEU: Sprach-Befehl ist jetzt "System Law"
+        lang_instruction = "You MUST answer in GERMAN." if request.lang == 'de' else "You MUST answer in ENGLISH."
         
         system_instruction = f"""
-        Du bist ein Auto-Experte. {lang_instruction}
-        Dein Ziel: Preis drücken für den Käufer. Sei kritisch aber fair.
+        {lang_instruction}
+        You are a professional car dealer negotiation assistant.
+        Your goal: Help the buyer negotiate a lower price.
+        
+        CRITICAL RULE:
+        - Analyze the text below for "Equipment" (Ausstattung) keywords (e.g., Leather, Navi, LED, Pano, ACC).
+        - If the text contains these keywords, DO NOT claim the car is "basic" or "naked".
+        - If the text is messy or cut off, assume "Equipment details unclear" instead of "No equipment".
         """
 
         user_prompt = f"""
-        Fahrzeug: {title}
-        Preis: {price} EUR
+        Car: {title}
+        Price: {price} EUR
         KM: {km}
-        EZ: {ez_string}
-        Beschreibung: "{desc_text}... {body_text[:600]}"
-
-        Aufgabe:
-        1. Analysiere Preis/Leistung.
-        2. WICHTIG: Suche im Text nach Ausstattung (Leder, Navi, Schiebedach, LED, etc.).
-           - Wenn viel fehlt -> Nutze das als Argument um den Preis zu drücken ("Nackte Basis").
-           - Wenn viel da ist -> Erwähne es positiv, aber suche trotzdem Mängel (Verschleiß).
-        3. Erstelle 3 knackige Verhandlungs-Argumente für den KÄUFER.
+        First Reg: {ez_string}
         
-        Antworte JSON:
+        RAW CAR DATA FROM WEBSITE (Read this carefully for equipment!): 
+        "{relevant_text}..."
+
+        Task:
+        1. Estimate a fair dealer purchase price (market_price_estimate).
+        2. Identify 3 strong negotiation arguments for the BUYER based on the data.
+           - If it has high mileage -> Argument about wear/tear.
+           - If it misses features -> Argument about base model.
+           - If it HAS features -> Find other flaws (e.g. price too high for age).
+        3. Create a short negotiation script sentence.
+        
+        Reply strictly in JSON:
         {{
             "market_price_estimate": (int),
-            "rating": "teuer/fair/good_deal",
+            "rating": "expensive/fair/good",
             "arguments": ["Arg1", "Arg2", "Arg3"],
-            "script": "Ein direkter Satz an den Verkäufer"
+            "script": "..."
         }}
         """
 
@@ -158,11 +153,10 @@ def analyze_car(request: CarRequest):
         except:
             ai_result = {}
 
-        # Fallback Werte
         est_price = ai_result.get("market_price_estimate", int(price * 0.95))
-        if est_price == 0: est_price = price # Vermeide 0€ Schätzung
+        if est_price == 0: est_price = price 
 
-        # DB Save
+        # DB Save (wie gehabt)
         try:
             supabase.table("scans").insert({
                 "url": str(request.url),
@@ -180,9 +174,11 @@ def analyze_car(request: CarRequest):
                 "market_price_estimate": est_price,
                 "rating": ai_result.get("rating", "fair"),
                 "negotiation_potential": price - est_price,
-                "arguments": ai_result.get("arguments", ["Daten unklar", "Preis prüfen"]),
+                "arguments": ai_result.get("arguments", ["Data unclear", "Check price locally"]),
                 "script": ai_result.get("script", "")
-            }
+            },
+            # NEU: Das Debug Feld!
+            "debug_text_snippet": relevant_text[:500] + " ... [CHECK CONSOLE FOR MORE] ... " 
         }
 
     except Exception as e:
