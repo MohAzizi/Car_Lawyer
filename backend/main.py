@@ -7,10 +7,9 @@ import re
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from datetime import datetime, timezone
+from datetime import datetime
 from supabase import create_client, Client
 import json
-import dateutil.parser
 
 load_dotenv()
 
@@ -38,52 +37,19 @@ except Exception as e:
 
 class CarRequest(BaseModel):
     url: str
-    lang: str = "de" 
+    # lang brauchen wir im Request nicht mehr zwingend für die Logik, 
+    # da wir jetzt IMMER beide Sprachen liefern.
 
 def clean_text(text):
     if not text: return ""
+    # Wir behalten Newlines bei, damit Listen erkennbar bleiben!
+    text = re.sub(r'\n+', ' | ', text) 
     return re.sub(r'\s+', ' ', text).strip()
 
-def parse_tech_data(soup):
-    """
-    Spezial-Funktion für AutoScout/Mobile Daten-Listen (dl/dt/dd).
-    Holt KM, EZ, Leistung, etc. sehr präzise aus den Tabellen.
-    """
-    data = {}
-    
-    # Suche nach allen Definitions-Listen (Standard für Specs)
-    dls = soup.find_all('dl')
-    
-    for dl in dls:
-        # Wir iterieren durch alle Zeilen in der Liste
-        dts = dl.find_all('dt') # Label (z.B. "Kilometerstand")
-        dds = dl.find_all('dd') # Wert (z.B. "10.000 km")
-        
-        if len(dts) == len(dds):
-            for i in range(len(dts)):
-                key = clean_text(dts[i].get_text()).lower()
-                val = clean_text(dds[i].get_text())
-                
-                if "kilometer" in key:
-                    data['km'] = val
-                elif "erstzulassung" in key:
-                    data['ez'] = val
-                elif "leistung" in key:
-                    data['power'] = val
-                elif "fahrzeughalter" in key:
-                    data['owners'] = val
-                elif "getriebe" in key:
-                    data['transmission'] = val
-                elif "kraftstoff" in key:
-                    data['fuel'] = val
-                    
-    return data
-
 def extract_structured_data(soup):
-    """ JSON-LD Extraction (Bleibt für den Preis wichtig) """
+    """ JSON-LD Extraction """
     data = {}
     scripts = soup.find_all('script', type='application/ld+json')
-    
     for script in scripts:
         try:
             json_content = json.loads(script.string)
@@ -99,10 +65,9 @@ def extract_structured_data(soup):
                 if isinstance(offer, list): offer = offer[0]
                 data['price'] = offer.get('price')
             
-            # Manchmal steht KM hier, manchmal nicht
             if 'mileageFromOdometer' in json_content:
                 data['km'] = json_content['mileageFromOdometer'].get('value')
-            
+                
             if 'name' in json_content: data['title'] = json_content['name']
             
             if 'image' in json_content:
@@ -115,21 +80,9 @@ def extract_structured_data(soup):
 
 @app.post("/analyze")
 def analyze_car(request: CarRequest):
-    print(f"🔎 Analysiere ({request.lang}): {request.url}")
+    print(f"🔎 Analysiere: {request.url}")
     
-    # 1. HISTORY CHECK
-    history_info = ""
-    try:
-        existing = supabase.table("scans").select("*").eq("url", request.url).order("created_at", desc=False).limit(1).execute()
-        if existing.data:
-            first = existing.data[0]
-            old_price = first['price']
-            # WICHTIG: Wir ignorieren den History-Check, wenn der alte Preis offensichtlich falsch war (> 60000 für diesen Lexus Fehler)
-            # Oder du löschst die DB Tabelle einmal manuell.
-            history_info = f"Old price: {old_price}"
-    except: pass
-
-    # 2. SCRAPING
+    # 1. SCRAPING
     params = {
         'api_key': SCRAPINGBEE_API_KEY,
         'url': request.url,
@@ -143,91 +96,84 @@ def analyze_car(request: CarRequest):
         response = requests.get('https://app.scrapingbee.com/api/v1/', params=params)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # A) JSON-LD (Bester Preis)
+        # A) JSON-LD (Preis & Basis)
         structured = extract_structured_data(soup)
         
-        # B) TABELLEN PARSING (Beste KM/EZ/Specs)
-        tech_data = parse_tech_data(soup)
+        # B) BESCHREIBUNG & AUSSTATTUNG (Das Wichtigste!)
+        # Wir suchen gezielt nach der Description-Box von AutoScout/Mobile
+        # Oft in div data-testid="description" oder class="description"
+        full_description = ""
         
-        # C) TEXT BODY (Für Ausstattung)
-        # Wir suchen gezielt nach Listen-Elementen (Ausstattung sind oft <li> oder in Grids)
-        equipment_text = ""
-        # Suche nach spezifischen Containern für Ausstattung (Mobile/Autoscout Klassen ändern sich oft, daher generisch)
-        feature_lists = soup.find_all(['div', 'ul'], class_=re.compile(r'equipment|feature|opt|item', re.I))
-        for f in feature_lists:
-            t = clean_text(f.get_text(" "))
-            if len(t) > 20 and len(t) < 3000: # Filtert Müll raus
-                equipment_text += t + " | "
-        
-        if len(equipment_text) < 50: # Fallback Body
-            equipment_text = soup.body.get_text(separator=' ', strip=True)[:10000]
+        # Versuche verschiedene gängige Container für Beschreibungen
+        desc_candidates = soup.find_all(['div', 'p'], attrs={"data-testid": re.compile(r"description", re.I)})
+        if not desc_candidates:
+            desc_candidates = soup.find_all(['div'], class_=re.compile(r"description|sc-grid-col-12", re.I))
 
-        # D) META FALLBACK
-        og_title = soup.find('meta', property='og:title')
-        title = structured.get('title') or (og_title['content'] if og_title else "Unbekannt")
-        image_url = structured.get('image') or (soup.find('meta', property='og:image')['content'] if soup.find('meta', property='og:image') else None)
+        for desc in desc_candidates:
+            # Hier holen wir den rohen Text mit Trennern, damit die Liste erhalten bleibt
+            full_description += clean_text(desc.get_text(" | ")) + " | "
 
-        # 3. DATEN ZUSAMMENFÜHREN
+        # Zusätzlich spezifische Ausstattungslisten (Data Grid)
+        tech_data_text = ""
+        dls = soup.find_all('dl')
+        for dl in dls:
+            tech_data_text += clean_text(dl.get_text(" : ")) + " | "
+            
+        # Fallback: Wenn wir kaum Text haben, nimm den Body (aber sauberer)
+        if len(full_description) < 100:
+             full_description = clean_text(soup.body.get_text())[:15000]
+
+        # Kombinierter Text für die KI
+        raw_text_for_ai = f"""
+        DESCRIPTION TEXT:
+        {full_description[:10000]}
         
-        # PREIS: JSON-LD gewinnt
+        TECH SPECS:
+        {tech_data_text[:3000]}
+        """
+
+        # Daten Mapping
+        title = structured.get('title') or "Fahrzeug"
+        image_url = structured.get('image')
+        
         price = 0
         if structured.get('price'): price = int(float(structured['price']))
         
-        # KM: Tech-Data (Tabelle) gewinnt vor JSON-LD
         km = 0
-        if tech_data.get('km'):
-            # "1.865 km" -> 1865
-            km = int(re.sub(r'[^\d]', '', tech_data['km']))
-        elif structured.get('km'):
-            km = int(float(structured['km']))
-            
-        # EZ: Tech-Data gewinnt
-        ez_string = tech_data.get('ez') or str(structured.get('year', 'Unbekannt'))
-        
-        # Zusatzinfos für KI
-        extra_specs = f"Power: {tech_data.get('power', 'N/A')}, Fuel: {tech_data.get('fuel', 'N/A')}, Owners: {tech_data.get('owners', 'N/A')}"
+        if structured.get('km'): km = int(float(structured['km']))
+        elif "km" in tech_data_text:
+             # Einfacher Regex Fallback für KM im Text
+             km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*km', tech_data_text, re.IGNORECASE)
+             if km_match: km = int(km_match.group(1).replace('.', ''))
 
-        # 4. KI ANALYSE (Language Fixed)
+        # 2. KI ANALYSE (JETZT MULTILINGUAL)
         client = OpenAI(api_key=OPENAI_API_KEY)
         
-        # Spracheinstellung
-        target_lang_name = "German" if request.lang == 'de' else "English"
+        system_instruction = """
+        You are an expert car negotiator.
+        Your task is to analyze the car data and the raw description text to identify negotiation points.
         
-        system_instruction = f"""
-        You are a car negotiation expert.
-        CRITICAL: ALL your output (rating, arguments, script) MUST be in {target_lang_name.upper()}.
-        Do NOT output English if the user asked for German.
+        CRITICAL: The description often contains a raw list of features (e.g., "SITZHEIZUNG", "ACC", "LED"). 
+        SCAN THE TEXT CAREFULLY. Do NOT say equipment is missing if it is listed in the text.
+        
+        OUTPUT FORMAT:
+        You must return a JSON object with TWO main keys: "de" (German) and "en" (English).
+        Each key must contain:
+        - rating (string: "expensive", "fair", "good_deal" / "teuer", "fair", "guter_deal")
+        - arguments (array of 3 strings)
+        - script (string, 1-2 sentences)
+        - market_price_estimate (number, same for both usually)
         """
 
         user_prompt = f"""
-        Analyze this car offer:
-        Title: {title}
+        Car: {title}
         Price: {price} EUR
         KM: {km}
-        EZ: {ez_string}
-        Specs: {extra_specs}
         
-        Detected Equipment / Features Text:
-        "{equipment_text[:4000]}"
-        
-        History Note (Internal): {history_info}
+        RAW TEXT FROM WEBSITE (Search here for equipment like 'Navi', 'Leder', 'ACC'!):
+        "{raw_text_for_ai}"
 
-        Task:
-        1. Rate the deal.
-        2. Find 3 hard arguments to negotiate the price down.
-           - Check KM and Age.
-           - Check Equipment text (look for leather, navi, sunroof, LED). 
-           - If equipment is missing in text, argue it's "basic".
-           - If price is high vs KM, mention that.
-        3. Write a negotiation script sentence.
-
-        Respond in JSON:
-        {{
-            "market_price_estimate": (int),
-            "rating": "expensive/fair/good",
-            "arguments": ["Argument 1", "Argument 2", "Argument 3"],
-            "script": "..."
-        }}
+        Generate the dual-language JSON analysis now.
         """
 
         try:
@@ -240,34 +186,28 @@ def analyze_car(request: CarRequest):
                 response_format={ "type": "json_object" }
             )
             ai_result = json.loads(completion.choices[0].message.content)
-        except: ai_result = {}
+        except Exception as e:
+            print(f"KI Error: {e}")
+            ai_result = {"de": {}, "en": {}} # Fallback
 
-        est_price = ai_result.get("market_price_estimate", int(price * 0.95))
-        if est_price == 0: est_price = price
-
-        # DB Save
+        # DB Save (Wir nehmen die deutschen Werte für die DB Statistik)
         try:
+            de_data = ai_result.get("de", {})
+            est = de_data.get("market_price_estimate", price)
             supabase.table("scans").insert({
                 "url": str(request.url),
                 "title": str(title),
                 "price": int(price),
-                "ai_market_estimate": int(est_price),
-                "rating": str(ai_result.get("rating", "fair"))
+                "ai_market_estimate": int(est),
+                "rating": str(de_data.get("rating", "fair"))
             }).execute()
         except: pass
 
         return {
             "meta": { "title": title, "url": request.url, "image": image_url },
-            "data": { "price": price, "km": km, "ez": ez_string },
-            "analysis": {
-                "market_price_estimate": est_price,
-                "rating": ai_result.get("rating", "fair"),
-                "negotiation_potential": price - est_price,
-                "arguments": ai_result.get("arguments", []),
-                "script": ai_result.get("script", "")
-            },
-            "debug_specs": extra_specs,
-            "debug_equipment_snippet": equipment_text[:200]
+            "data": { "price": price, "km": km },
+            "analysis": ai_result, # Gibt jetzt { "de": {...}, "en": {...} } zurück
+            "debug_snippet": raw_text_for_ai[:500]
         }
 
     except Exception as e:
