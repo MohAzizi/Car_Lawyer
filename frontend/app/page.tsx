@@ -2,6 +2,7 @@
 import { useState } from "react";
 
 export default function Home() {
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<any>(null);
@@ -15,7 +16,7 @@ export default function Home() {
 
     try {
       // Wir rufen DEIN Backend auf
-      const res = await fetch("http://127.0.0.1:8000/analyze", {
+      const res = await fetch(`${API_URL}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
