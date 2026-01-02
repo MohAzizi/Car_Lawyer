@@ -11,6 +11,7 @@ const UI_TEXTS = {
     placeholder: "Link von Mobile.de oder AutoScout24 einfügen...",
     button: "Kostenlos Checken",
     loading: "Analysiere Marktdaten & Ausstattung...",
+    actualPrice: "Aktueller Preis",
     resultTitle: "Analyse Ergebnis",
     marketValue: "Marktwert Schätzung",
     savings: "Dein Verhandlungspotenzial",
@@ -25,6 +26,7 @@ const UI_TEXTS = {
     placeholder: "Paste Mobile.de or AutoScout24 link...",
     button: "Check for Free",
     loading: "Analyzing market data & equipment...",
+    actualPrice: "Current Price",
     resultTitle: "Analysis Result",
     marketValue: "Estimated Market Value",
     savings: "Negotiation Potential",
@@ -32,6 +34,7 @@ const UI_TEXTS = {
     script: "Say exactly this:",
     footer: "No legal advice. Educational purposes only.",
     features: ["AI Price Analysis", "Equipment Check", "Negotiation Scripts"]
+
   }
 };
 
@@ -188,7 +191,7 @@ export default function Home() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 text-center">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Aktueller Preis</p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">  {ui.actualPrice} </p>
                   <p className="text-3xl font-black text-slate-900">{report.data.price.toLocaleString()} €</p>
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
@@ -223,13 +226,7 @@ export default function Home() {
                     <p className="italic text-white">"{analysis.script}"</p>
                   </div>
                 </div>
-              </div>
-              
-              {/* Debug Anzeige (Optional, kann später raus) */}
-              <div className="mt-8 text-xs text-slate-300 font-mono break-all bg-slate-900 p-2 rounded">
-                 DEBUG SNIPPET: {report.debug_snippet}
-              </div>
-
+              </div>                         
             </div>
           </div>
         )}

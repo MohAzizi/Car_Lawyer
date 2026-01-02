@@ -37,14 +37,28 @@ except Exception as e:
 
 class CarRequest(BaseModel):
     url: str
-    # lang brauchen wir im Request nicht mehr zwingend für die Logik, 
-    # da wir jetzt IMMER beide Sprachen liefern.
 
 def clean_text(text):
     if not text: return ""
-    # Wir behalten Newlines bei, damit Listen erkennbar bleiben!
     text = re.sub(r'\n+', ' | ', text) 
     return re.sub(r'\s+', ' ', text).strip()
+
+def remove_noise(soup):
+    """
+    Entfernt Navigation, Footer, Scripts und Werbung aus dem HTML.
+    Das ist entscheidend, damit die KI nicht das Menü liest!
+    """
+    # Liste der Tags, die wir sicher löschen können
+    noise_tags = ['header', 'footer', 'nav', 'script', 'style', 'noscript', 'iframe', 'svg']
+    for tag in soup(noise_tags):
+        tag.decompose()
+        
+    # Entferne Elemente anhand von Klassen (Cookie Banner, Menüs)
+    noise_classes = re.compile(r'cookie|banner|menu|navigation|footer|header|legal|social', re.I)
+    for tag in soup.find_all(class_=noise_classes):
+        tag.decompose()
+        
+    return soup
 
 def extract_structured_data(soup):
     """ JSON-LD Extraction """
@@ -96,39 +110,47 @@ def analyze_car(request: CarRequest):
         response = requests.get('https://app.scrapingbee.com/api/v1/', params=params)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # A) JSON-LD (Preis & Basis)
+        # A) JSON-LD (Preis & Basis) - VOR dem Noise Removal holen!
         structured = extract_structured_data(soup)
         
-        # B) BESCHREIBUNG & AUSSTATTUNG (Das Wichtigste!)
-        # Wir suchen gezielt nach der Description-Box von AutoScout/Mobile
-        # Oft in div data-testid="description" oder class="description"
+        # B) CLEANUP (Müll entfernen)
+        soup = remove_noise(soup)
+        
+        # C) BESCHREIBUNG & AUSSTATTUNG
+        # Jetzt suchen wir im gesäuberten HTML
+        
         full_description = ""
         
-        # Versuche verschiedene gängige Container für Beschreibungen
+        # Strategie 1: Spezifische Container (Mobile/AutoScout)
         desc_candidates = soup.find_all(['div', 'p'], attrs={"data-testid": re.compile(r"description", re.I)})
+        
+        # Strategie 2: Wenn das fehlschlägt, suchen wir Textblöcke mit Keywords
         if not desc_candidates:
-            desc_candidates = soup.find_all(['div'], class_=re.compile(r"description|sc-grid-col-12", re.I))
+            # Suche nach Bereichen, die "Ausstattung" oder "Beschreibung" enthalten
+            for tag in soup.find_all(['div', 'section']):
+                txt = tag.get_text().lower()
+                if ("ausstattung" in txt or "beschreibung" in txt) and len(txt) > 200:
+                    desc_candidates.append(tag)
 
+        # Text extrahieren
         for desc in desc_candidates:
-            # Hier holen wir den rohen Text mit Trennern, damit die Liste erhalten bleibt
             full_description += clean_text(desc.get_text(" | ")) + " | "
 
-        # Zusätzlich spezifische Ausstattungslisten (Data Grid)
+        # Zusätzlich Tabellen-Daten (Tech Specs)
         tech_data_text = ""
         dls = soup.find_all('dl')
         for dl in dls:
             tech_data_text += clean_text(dl.get_text(" : ")) + " | "
             
-        # Fallback: Wenn wir kaum Text haben, nimm den Body (aber sauberer)
+        # Fallback: Wenn wir immer noch nix haben, nimm den Body (der jetzt sauber ist!)
         if len(full_description) < 100:
              full_description = clean_text(soup.body.get_text())[:15000]
 
-        # Kombinierter Text für die KI
         raw_text_for_ai = f"""
-        DESCRIPTION TEXT:
+        DESCRIPTION:
         {full_description[:10000]}
         
-        TECH SPECS:
+        SPECS:
         {tech_data_text[:3000]}
         """
 
@@ -142,27 +164,24 @@ def analyze_car(request: CarRequest):
         km = 0
         if structured.get('km'): km = int(float(structured['km']))
         elif "km" in tech_data_text:
-             # Einfacher Regex Fallback für KM im Text
              km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*km', tech_data_text, re.IGNORECASE)
              if km_match: km = int(km_match.group(1).replace('.', ''))
 
-        # 2. KI ANALYSE (JETZT MULTILINGUAL)
+        # 2. KI ANALYSE
         client = OpenAI(api_key=OPENAI_API_KEY)
         
         system_instruction = """
         You are an expert car negotiator.
-        Your task is to analyze the car data and the raw description text to identify negotiation points.
+        Analyze the raw description text to identify negotiation points.
         
-        CRITICAL: The description often contains a raw list of features (e.g., "SITZHEIZUNG", "ACC", "LED"). 
-        SCAN THE TEXT CAREFULLY. Do NOT say equipment is missing if it is listed in the text.
+        CRITICAL: 
+        1. The text might be messy. Look for keywords: "Sitzheizung", "Leder", "Navi", "ACC", "LED", "Scheckheft".
+        2. If you find these features, ACKNOWLEDGE them. Do NOT say they are missing.
+        3. Only argue "missing features" if the text really looks like a base model.
         
-        OUTPUT FORMAT:
-        You must return a JSON object with TWO main keys: "de" (German) and "en" (English).
-        Each key must contain:
-        - rating (string: "expensive", "fair", "good_deal" / "teuer", "fair", "guter_deal")
-        - arguments (array of 3 strings)
-        - script (string, 1-2 sentences)
-        - market_price_estimate (number, same for both usually)
+        OUTPUT FORMAT (JSON):
+        Returns keys "de" and "en".
+        Each contains: rating, arguments (array), script, market_price_estimate.
         """
 
         user_prompt = f"""
@@ -170,10 +189,10 @@ def analyze_car(request: CarRequest):
         Price: {price} EUR
         KM: {km}
         
-        RAW TEXT FROM WEBSITE (Search here for equipment like 'Navi', 'Leder', 'ACC'!):
+        RAW TEXT (Scraped & Cleaned):
         "{raw_text_for_ai}"
 
-        Generate the dual-language JSON analysis now.
+        Generate dual-language JSON analysis.
         """
 
         try:
@@ -188,9 +207,9 @@ def analyze_car(request: CarRequest):
             ai_result = json.loads(completion.choices[0].message.content)
         except Exception as e:
             print(f"KI Error: {e}")
-            ai_result = {"de": {}, "en": {}} # Fallback
+            ai_result = {"de": {}, "en": {}}
 
-        # DB Save (Wir nehmen die deutschen Werte für die DB Statistik)
+        # DB Save
         try:
             de_data = ai_result.get("de", {})
             est = de_data.get("market_price_estimate", price)
@@ -206,8 +225,7 @@ def analyze_car(request: CarRequest):
         return {
             "meta": { "title": title, "url": request.url, "image": image_url },
             "data": { "price": price, "km": km },
-            "analysis": ai_result, # Gibt jetzt { "de": {...}, "en": {...} } zurück
-            "debug_snippet": raw_text_for_ai[:500]
+            "analysis": ai_result
         }
 
     except Exception as e:
