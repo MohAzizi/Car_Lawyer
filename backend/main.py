@@ -103,7 +103,11 @@ def analyze_car(request: CarRequest):
         'render_js': 'True', 
         'premium_proxy': 'True', 
         'country_code': 'de',
-        'wait_browser': 'networkidle2' 
+        # 'networkidle2' wartet bis fast alles geladen ist -> Langsam
+        # 'domcontentloaded' feuert früher (sobald HTML da ist) -> Schneller
+        'wait_browser': 'domcontentloaded', 
+        'block_resources': 'True',  # Blockiert Bilder & CSS (Riesiger Speed-Boost!)
+        'block_ads': 'True'         # Blockiert Werbung
     }
 
     try:

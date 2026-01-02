@@ -199,7 +199,10 @@ export default function Home() {
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
                   <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-1">{ui.marketValue}</p>
-                  <p className="text-3xl font-black text-indigo-700">{analysis.market_price_estimate?.toLocaleString()} €</p>
+                  {/* Fallback hinzugefügt: || report.data.price */}
+                  <p className="text-3xl font-black text-indigo-700">
+                    {(analysis.market_price_estimate || report.data.price).toLocaleString()} €
+                  </p>
                 </div>
               </div>
 
@@ -209,10 +212,23 @@ export default function Home() {
                   <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
                   
                   <p className="text-4xl font-extrabold mb-6">
-                     {report.data.price - analysis.market_price_estimate > 0 ? "-" : "+"}
-                     {Math.abs(report.data.price - analysis.market_price_estimate).toLocaleString()} €
+                    {(() => {
+                      // Sicherstellen, dass wir Zahlen haben
+                      const currentPrice = report.data.price || 0;
+                      // Fallback: Wenn KI keinen Wert liefert, nimm den aktuellen Preis (Diff = 0)
+                      const estimatedPrice = analysis.market_price_estimate || currentPrice; 
+                      const diff = currentPrice - estimatedPrice;
+                      
+                      return (
+                        <>
+                          {diff > 0 ? "-" : "+"}
+                          {Math.abs(diff).toLocaleString()} €
+                        </>
+                      );
+                    })()}
                   </p>
 
+                  
                   <h3 className="font-bold text-white mb-3 flex items-center gap-2">
                     {ui.ammo}
                   </h3>
