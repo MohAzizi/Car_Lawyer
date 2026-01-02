@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Search, Gauge, AlertTriangle, CheckCircle, ArrowRight, Globe } from "lucide-react";
 
-// Statische UI Texte
+// --- UI TEXTE (Jetzt mit "actualPrice") ---
 const UI_TEXTS = {
   de: {
     title: "Deal Anwalt",
@@ -11,9 +11,9 @@ const UI_TEXTS = {
     placeholder: "Link von Mobile.de oder AutoScout24 einfügen...",
     button: "Kostenlos Checken",
     loading: "Analysiere Marktdaten & Ausstattung...",
-    actualPrice: "Aktueller Preis",
     resultTitle: "Analyse Ergebnis",
     marketValue: "Marktwert Schätzung",
+    actualPrice: "Aktueller Preis", // NEU HINZUGEFÜGT
     savings: "Dein Verhandlungspotenzial",
     ammo: "🔥 Deine Munition:",
     script: "Sag genau das:",
@@ -26,15 +26,14 @@ const UI_TEXTS = {
     placeholder: "Paste Mobile.de or AutoScout24 link...",
     button: "Check for Free",
     loading: "Analyzing market data & equipment...",
-    actualPrice: "Current Price",
     resultTitle: "Analysis Result",
     marketValue: "Estimated Market Value",
+    actualPrice: "Current Price", // NEU HINZUGEFÜGT
     savings: "Negotiation Potential",
     ammo: "🔥 Your Ammo:",
     script: "Say exactly this:",
     footer: "No legal advice. Educational purposes only.",
     features: ["AI Price Analysis", "Equipment Check", "Negotiation Scripts"]
-
   }
 };
 
@@ -45,11 +44,11 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lang, setLang] = useState<"de" | "en">("de");
 
-  const ui = UI_TEXTS[lang]; // UI Texte
+  const ui = UI_TEXTS[lang]; 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
   const analyzeCar = async () => {
-    // Einfacher Domain Check
+    // Domain Check
     const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
     const isValid = validDomains.some(domain => url.toLowerCase().includes(domain));
 
@@ -68,7 +67,7 @@ export default function Home() {
       const res = await fetch(`${API_URL}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }), // Wir brauchen 'lang' nicht mehr senden
+        body: JSON.stringify({ url }), 
       });
 
       if (!res.ok) throw new Error("Server Error");
@@ -81,11 +80,11 @@ export default function Home() {
     }
   };
 
-  // Hilfsfunktion um die KI Daten basierend auf der Sprache zu holen
+  // Daten basierend auf Sprache holen
   const getAnalysisData = () => {
     if (!report || !report.analysis) return null;
-    // Hier ist der Trick: Wir wählen 'de' oder 'en' aus dem Backend-Antwort-Objekt
-    return report.analysis[lang] || report.analysis['de']; 
+    // Fallback, falls das Backend noch das alte Format sendet
+    return report.analysis[lang] || report.analysis['de'] || report.analysis; 
   };
 
   const analysis = getAnalysisData();
@@ -152,7 +151,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* SKELETON LOADING */}
+        {/* LOADING */}
         {loading && (
           <div className="mt-12 w-full space-y-4 animate-pulse">
             <div className="h-64 bg-slate-200 rounded-2xl w-full"></div>
@@ -186,12 +185,16 @@ export default function Home() {
               <div className="flex gap-4 text-sm text-slate-500 mb-6 font-medium">
                 <span>🛣 {report.data.km.toLocaleString()} km</span>
                 {/* Preis Anzeige */}
-                <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700">Actual: {report.data.price.toLocaleString()} €</span>
+                <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700">
+                  Actual: {report.data.price.toLocaleString()} €
+                </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 text-center">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">  {ui.actualPrice} </p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
+                    {ui.actualPrice}
+                  </p>
                   <p className="text-3xl font-black text-slate-900">{report.data.price.toLocaleString()} €</p>
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
@@ -204,7 +207,7 @@ export default function Home() {
               <div className="bg-gradient-to-br from-indigo-600 to-violet-700 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
                 <div className="relative z-10">
                   <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
-                  {/* Berechnung Potential */}
+                  
                   <p className="text-4xl font-extrabold mb-6">
                      {report.data.price - analysis.market_price_estimate > 0 ? "-" : "+"}
                      {Math.abs(report.data.price - analysis.market_price_estimate).toLocaleString()} €
@@ -226,7 +229,10 @@ export default function Home() {
                     <p className="italic text-white">"{analysis.script}"</p>
                   </div>
                 </div>
-              </div>                         
+              </div>
+              
+              {/* DEBUG WURDE ENTFERNT */}
+
             </div>
           </div>
         )}
