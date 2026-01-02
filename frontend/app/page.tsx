@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Search, Gauge, AlertTriangle, CheckCircle, ArrowRight, Globe } from "lucide-react";
 
-// --- UI TEXTE (Jetzt mit "actualPrice") ---
+// --- UI TEXTE ---
 const UI_TEXTS = {
   de: {
     title: "Deal Anwalt",
@@ -13,7 +13,7 @@ const UI_TEXTS = {
     loading: "Analysiere Marktdaten & Ausstattung...",
     resultTitle: "Analyse Ergebnis",
     marketValue: "Marktwert Schätzung",
-    actualPrice: "Aktueller Preis", // NEU HINZUGEFÜGT
+    actualPrice: "Aktueller Preis",
     savings: "Dein Verhandlungspotenzial",
     ammo: "🔥 Deine Munition:",
     script: "Sag genau das:",
@@ -28,7 +28,7 @@ const UI_TEXTS = {
     loading: "Analyzing market data & equipment...",
     resultTitle: "Analysis Result",
     marketValue: "Estimated Market Value",
-    actualPrice: "Current Price", // NEU HINZUGEFÜGT
+    actualPrice: "Current Price",
     savings: "Negotiation Potential",
     ammo: "🔥 Your Ammo:",
     script: "Say exactly this:",
@@ -47,8 +47,23 @@ export default function Home() {
   const ui = UI_TEXTS[lang]; 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
+  // --- HILFSFUNKTION: Aggressive Zahlen-Reinigung ---
+  // Egal ob "22000", "ca. 22.000 €" oder "Der Preis ist 22k" -> Gibt immer eine saubere Zahl zurück.
+  const getSafeNumber = (val: any): number => {
+    if (typeof val === 'number') return val;
+    if (!val) return 0;
+    
+    // Versuche, Zahlen aus String zu extrahieren
+    if (typeof val === 'string') {
+        // Entfernt alles außer Ziffern (macht aus "22.500 €" -> "22500")
+        const cleanString = val.replace(/[^0-9]/g, '');
+        const num = parseInt(cleanString);
+        return isNaN(num) ? 0 : num;
+    }
+    return 0;
+  };
+
   const analyzeCar = async () => {
-    // Domain Check
     const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
     const isValid = validDomains.some(domain => url.toLowerCase().includes(domain));
 
@@ -80,14 +95,29 @@ export default function Home() {
     }
   };
 
-  // Daten basierend auf Sprache holen
   const getAnalysisData = () => {
     if (!report || !report.analysis) return null;
-    // Fallback, falls das Backend noch das alte Format sendet
     return report.analysis[lang] || report.analysis['de'] || report.analysis; 
   };
 
   const analysis = getAnalysisData();
+
+  // BERECHNUNGS-LOGIK VOR DEM RENDER (Sauberer)
+  let currentPrice = 0;
+  let estimatedPrice = 0;
+  let diff = 0;
+  let displayEstimate = "---";
+
+  if (report && analysis) {
+      currentPrice = getSafeNumber(report.data.price);
+      estimatedPrice = getSafeNumber(analysis.market_price_estimate);
+      
+      // Fallback: Wenn Schätzung 0 ist oder kleiner als 100€ (Fehler), nimm den aktuellen Preis
+      if (estimatedPrice < 100) estimatedPrice = currentPrice;
+
+      diff = currentPrice - estimatedPrice;
+      displayEstimate = estimatedPrice.toLocaleString();
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
@@ -151,7 +181,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* LOADING */}
+        {/* LOADING SKELETON */}
         {loading && (
           <div className="mt-12 w-full space-y-4 animate-pulse">
             <div className="h-64 bg-slate-200 rounded-2xl w-full"></div>
@@ -183,10 +213,9 @@ export default function Home() {
             <div className="p-8">
               <h2 className="text-2xl font-bold text-slate-900 mb-2">{report.meta.title}</h2>
               <div className="flex gap-4 text-sm text-slate-500 mb-6 font-medium">
-                <span>🛣 {report.data.km.toLocaleString()} km</span>
-                {/* Preis Anzeige */}
+                <span>🛣 {getSafeNumber(report.data.km).toLocaleString()} km</span>
                 <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700">
-                  Actual: {report.data.price.toLocaleString()} €
+                  Actual: {currentPrice.toLocaleString()} €
                 </span>
               </div>
 
@@ -195,14 +224,11 @@ export default function Home() {
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
                     {ui.actualPrice}
                   </p>
-                  <p className="text-3xl font-black text-slate-900">{report.data.price.toLocaleString()} €</p>
+                  <p className="text-3xl font-black text-slate-900">{currentPrice.toLocaleString()} €</p>
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
                   <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-1">{ui.marketValue}</p>
-                  {/* Fallback hinzugefügt: || report.data.price */}
-                  <p className="text-3xl font-black text-indigo-700">
-                    {(analysis.market_price_estimate || report.data.price).toLocaleString()} €
-                  </p>
+                  <p className="text-3xl font-black text-indigo-700">{displayEstimate} €</p>
                 </div>
               </div>
 
@@ -211,23 +237,10 @@ export default function Home() {
                 <div className="relative z-10">
                   <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
                   
+                  {/* HIER WIRD 'NaN' VERHINDERT: Wir nutzen die vor-berechnete Variable 'diff' */}
                   <p className="text-4xl font-extrabold mb-6">
-                    {(() => {
-                      // Sicherstellen, dass wir Zahlen haben
-                      const currentPrice = report.data.price || 0;
-                      // Fallback: Wenn KI keinen Wert liefert, nimm den aktuellen Preis (Diff = 0)
-                      const estimatedPrice = analysis.market_price_estimate || currentPrice; 
-                      const diff = currentPrice - estimatedPrice;
-                      
-                      return (
-                        <>
-                          {diff > 0 ? "-" : "+"}
-                          {Math.abs(diff).toLocaleString()} €
-                        </>
-                      );
-                    })()}
+                     {diff > 0 ? "-" : "+"}{Math.abs(diff).toLocaleString()} €
                   </p>
-
                   
                   <h3 className="font-bold text-white mb-3 flex items-center gap-2">
                     {ui.ammo}
@@ -246,8 +259,6 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-              
-              {/* DEBUG WURDE ENTFERNT */}
 
             </div>
           </div>
