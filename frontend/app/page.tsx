@@ -44,21 +44,28 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lang, setLang] = useState<"de" | "en">("de");
 
-  const ui = UI_TEXTS[lang]; 
+  const ui = UI_TEXTS[lang] || UI_TEXTS.de;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-  // --- HILFSFUNKTION: Aggressive Zahlen-Reinigung ---
-  // Egal ob "22000", "ca. 22.000 €" oder "Der Preis ist 22k" -> Gibt immer eine saubere Zahl zurück.
+  // --- SICHERE ZAHLEN-PARSING FUNKTION ---
   const getSafeNumber = (val: any): number => {
     if (typeof val === 'number') return val;
     if (!val) return 0;
     
-    // Versuche, Zahlen aus String zu extrahieren
     if (typeof val === 'string') {
-        // Entfernt alles außer Ziffern (macht aus "22.500 €" -> "22500")
-        const cleanString = val.replace(/[^0-9]/g, '');
-        const num = parseInt(cleanString);
-        return isNaN(num) ? 0 : num;
+        // Entferne Punkte (Tausender) und Kommas
+        const clean = val.replace(/\./g, '').replace(/,/g, '');
+        
+        // Suche die ERSTE logische Zahl im Text (min 3 Ziffern)
+        // Das verhindert, dass "20.000 - 25.000" zu "2000025000" verschmilzt
+        const match = clean.match(/(\d{3,})/);
+        if (match) {
+            const num = parseInt(match[0]);
+            // Plausibilitäts-Check: Kein Auto kostet über 5 Millionen Euro hier
+            // Wenn die Zahl riesig ist (Parse-Fehler), gib 0 zurück
+            if (num > 5000000) return 0;
+            return num;
+        }
     }
     return 0;
   };
@@ -102,21 +109,23 @@ export default function Home() {
 
   const analysis = getAnalysisData();
 
-  // BERECHNUNGS-LOGIK VOR DEM RENDER (Sauberer)
+  // --- EINFACHE BERECHNUNG (Ohne Hooks) ---
   let currentPrice = 0;
   let estimatedPrice = 0;
   let diff = 0;
-  let displayEstimate = "---";
 
   if (report && analysis) {
-      currentPrice = getSafeNumber(report.data.price);
-      estimatedPrice = getSafeNumber(analysis.market_price_estimate);
-      
-      // Fallback: Wenn Schätzung 0 ist oder kleiner als 100€ (Fehler), nimm den aktuellen Preis
-      if (estimatedPrice < 100) estimatedPrice = currentPrice;
+      // 1. Daten holen & bereinigen
+      currentPrice = getSafeNumber(report?.data?.price);
+      estimatedPrice = getSafeNumber(analysis?.market_price_estimate);
 
+      // 2. Sicherheits-Check: Wenn Schätzung fehlt oder > 5 Mio (Fehler), nimm aktuellen Preis
+      if (estimatedPrice < 100 || estimatedPrice > 5000000) {
+          estimatedPrice = currentPrice;
+      }
+
+      // 3. Differenz
       diff = currentPrice - estimatedPrice;
-      displayEstimate = estimatedPrice.toLocaleString();
   }
 
   return (
@@ -181,7 +190,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* LOADING SKELETON */}
+        {/* LOADING */}
         {loading && (
           <div className="mt-12 w-full space-y-4 animate-pulse">
             <div className="h-64 bg-slate-200 rounded-2xl w-full"></div>
@@ -193,27 +202,27 @@ export default function Home() {
         {report && !loading && analysis && (
           <div className="mt-12 w-full bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in zoom-in-95 duration-300">
             
-            {/* Bild & Header */}
+            {/* Bild */}
             <div className="relative h-64 bg-slate-100">
-              {report.meta.image ? (
+              {report?.meta?.image ? (
                 <img src={report.meta.image} alt="Car" className="w-full h-full object-cover" />
               ) : (
                 <div className="flex items-center justify-center h-full text-slate-400">Kein Bild gefunden</div>
               )}
               <div className="absolute top-4 right-4">
                 <span className={`px-4 py-2 rounded-full font-bold text-sm shadow-lg uppercase tracking-wider ${
-                  (analysis.rating || "").toLowerCase().includes("teuer") || (analysis.rating || "").toLowerCase().includes("expensive") ? "bg-red-500 text-white" : 
-                  (analysis.rating || "").toLowerCase().includes("fair") ? "bg-yellow-400 text-slate-900" : "bg-green-500 text-white"
+                  (analysis?.rating || "").toLowerCase().includes("teuer") || (analysis?.rating || "").toLowerCase().includes("expensive") ? "bg-red-500 text-white" : 
+                  (analysis?.rating || "").toLowerCase().includes("fair") ? "bg-yellow-400 text-slate-900" : "bg-green-500 text-white"
                 }`}>
-                  {analysis.rating}
+                  {analysis?.rating || "Info"}
                 </span>
               </div>
             </div>
 
             <div className="p-8">
-              <h2 className="text-2xl font-bold text-slate-900 mb-2">{report.meta.title}</h2>
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">{report?.meta?.title || "Fahrzeug"}</h2>
               <div className="flex gap-4 text-sm text-slate-500 mb-6 font-medium">
-                <span>🛣 {getSafeNumber(report.data.km).toLocaleString()} km</span>
+                <span>🛣 {getSafeNumber(report?.data?.km).toLocaleString()} km</span>
                 <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700">
                   Actual: {currentPrice.toLocaleString()} €
                 </span>
@@ -228,7 +237,7 @@ export default function Home() {
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
                   <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-1">{ui.marketValue}</p>
-                  <p className="text-3xl font-black text-indigo-700">{displayEstimate} €</p>
+                  <p className="text-3xl font-black text-indigo-700">{estimatedPrice.toLocaleString()} €</p>
                 </div>
               </div>
 
@@ -237,7 +246,6 @@ export default function Home() {
                 <div className="relative z-10">
                   <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
                   
-                  {/* HIER WIRD 'NaN' VERHINDERT: Wir nutzen die vor-berechnete Variable 'diff' */}
                   <p className="text-4xl font-extrabold mb-6">
                      {diff > 0 ? "-" : "+"}{Math.abs(diff).toLocaleString()} €
                   </p>
@@ -246,7 +254,7 @@ export default function Home() {
                     {ui.ammo}
                   </h3>
                   <ul className="space-y-3 text-indigo-100 text-sm mb-6">
-                    {analysis.arguments?.map((arg: string, index: number) => (
+                    {Array.isArray(analysis?.arguments) && analysis.arguments.map((arg: string, index: number) => (
                       <li key={index} className="flex gap-2 items-start">
                          <span className="mt-1 bg-indigo-500/50 p-1 rounded-full text-[10px]">➤</span> {arg}
                       </li>
@@ -255,7 +263,7 @@ export default function Home() {
 
                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/10">
                     <p className="text-[10px] font-bold text-indigo-200 uppercase mb-2">{ui.script}</p>
-                    <p className="italic text-white">"{analysis.script}"</p>
+                    <p className="italic text-white">"{analysis?.script || "..."}"</p>
                   </div>
                 </div>
               </div>
