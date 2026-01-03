@@ -44,26 +44,42 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lang, setLang] = useState<"de" | "en">("de");
 
-  // Fallback, falls lang undefined wäre (Sicherheit)
   const ui = UI_TEXTS[lang] || UI_TEXTS.de;
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-  // --- HILFSFUNKTION: Aggressive Zahlen-Reinigung ---
+  // --- NEUE, INTELLIGENTE ZAHLEN-ERKENNUNG (FIX für Milliarden-Fehler) ---
   const getSafeNumber = (val: any): number => {
+    // 1. Wenn es schon eine Zahl ist, super.
     if (typeof val === 'number') return val;
     if (!val) return 0;
     
+    // 2. Wenn es ein String ist (z.B. "22.000 - 25.000 €" oder "ca. 20k")
     if (typeof val === 'string') {
-        // Entfernt alles außer Ziffern
-        const cleanString = val.replace(/[^0-9]/g, '');
-        const num = parseInt(cleanString);
-        return isNaN(num) ? 0 : num;
+        // Entferne Tausender-Punkte (DE Format), behalte aber Leerzeichen als Trenner
+        // Wir machen aus "22.500" -> "22500"
+        const cleanString = val.replace(/\./g, '').replace(/,/g, '');
+        
+        // Suche nach allen zusammenhängenden Zahlenfolgen mit mind. 3 Ziffern
+        // Das verhindert, dass wir Jahreszahlen wie "2023" aus Versehen als Preis nehmen, 
+        // wenn davor ein echter Preis steht, aber hier nehmen wir alles ab 100.
+        const numbersFound = cleanString.match(/\d{3,}/g);
+
+        if (numbersFound && numbersFound.length > 0) {
+            // Konvertiere alle gefundenen Strings in echte Zahlen
+            const parsedNumbers = numbersFound.map(n => parseInt(n));
+
+            // Wenn wir MEHRERE Zahlen finden (z.B. Range "22000" und "25000"),
+            // berechnen wir den DURCHSCHNITT. Das verhindert das "Milliarden"-Problem.
+            const sum = parsedNumbers.reduce((a, b) => a + b, 0);
+            const avg = Math.floor(sum / parsedNumbers.length);
+            
+            return avg;
+        }
     }
     return 0;
   };
 
   const analyzeCar = async () => {
-    // Einfacher Domain Check
     const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
     const isValid = validDomains.some(domain => url.toLowerCase().includes(domain));
 
@@ -95,7 +111,6 @@ export default function Home() {
     }
   };
 
-  // Sichere Daten-Extraktion
   const getAnalysisData = () => {
     if (!report || !report.analysis) return null;
     return report.analysis[lang] || report.analysis['de'] || report.analysis; 
@@ -103,20 +118,22 @@ export default function Home() {
 
   const analysis = getAnalysisData();
 
-  // BERECHNUNGS-LOGIK (Mit useMemo für Performance & Sicherheit)
+  // BERECHNUNGS-LOGIK MIT SICHERHEITSNETZ
   const { currentPrice, estimatedPrice, diff, displayEstimate } = useMemo(() => {
       let cPrice = 0;
       let ePrice = 0;
       let difference = 0;
       let dispEst = "---";
 
-      // Wir prüfen hier jedes einzelne Feld mit ?. (Optional Chaining)
       if (report && analysis) {
+          // Hier nutzen wir den neuen Parser
           cPrice = getSafeNumber(report?.data?.price);
           ePrice = getSafeNumber(analysis?.market_price_estimate);
           
-          // Fallback Logik
-          if (ePrice < 100) ePrice = cPrice;
+          // SANITY CHECK: Wenn der Preis unrealistisch klein ist (unter 100€)
+          // oder unrealistisch groß (> 5 Millionen für normalen Check), 
+          // dann fallback auf aktuellen Preis.
+          if (ePrice < 100 || ePrice > 5000000) ePrice = cPrice;
 
           difference = cPrice - ePrice;
           dispEst = ePrice.toLocaleString();
@@ -192,7 +209,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* LOADING SKELETON */}
+        {/* LOADING */}
         {loading && (
           <div className="mt-12 w-full space-y-4 animate-pulse">
             <div className="h-64 bg-slate-200 rounded-2xl w-full"></div>
@@ -200,11 +217,10 @@ export default function Home() {
           </div>
         )}
 
-        {/* RESULTAT - Mit extra Sicherheitschecks */}
+        {/* RESULTAT */}
         {report && !loading && analysis && (
           <div className="mt-12 w-full bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in zoom-in-95 duration-300">
             
-            {/* Bild & Header */}
             <div className="relative h-64 bg-slate-100">
               {report?.meta?.image ? (
                 <img src={report.meta.image} alt="Car" className="w-full h-full object-cover" />
@@ -224,7 +240,6 @@ export default function Home() {
             <div className="p-8">
               <h2 className="text-2xl font-bold text-slate-900 mb-2">{report?.meta?.title || "Fahrzeug"}</h2>
               <div className="flex gap-4 text-sm text-slate-500 mb-6 font-medium">
-                {/* Sichere Zugriffe auf km */}
                 <span>🛣 {getSafeNumber(report?.data?.km).toLocaleString()} km</span>
                 <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700">
                   Actual: {currentPrice.toLocaleString()} €
@@ -249,7 +264,6 @@ export default function Home() {
                 <div className="relative z-10">
                   <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
                   
-                  {/* Berechnung sicher anzeigen */}
                   <p className="text-4xl font-extrabold mb-6">
                      {diff > 0 ? "-" : "+"}{Math.abs(diff).toLocaleString()} €
                   </p>
@@ -258,7 +272,6 @@ export default function Home() {
                     {ui.ammo}
                   </h3>
                   <ul className="space-y-3 text-indigo-100 text-sm mb-6">
-                    {/* Sicherstellen, dass arguments ein Array ist */}
                     {Array.isArray(analysis?.arguments) && analysis.arguments.map((arg: string, index: number) => (
                       <li key={index} className="flex gap-2 items-start">
                          <span className="mt-1 bg-indigo-500/50 p-1 rounded-full text-[10px]">➤</span> {arg}
