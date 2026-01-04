@@ -30,7 +30,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Speicher für Nutzersprachen (Im RAM - resettet bei Neustart, für MVP okay)
 USER_LANGUAGES = {} 
 
 try:
@@ -55,25 +54,6 @@ def remove_noise(soup):
     noise_classes = re.compile(r'cookie|banner|menu|navigation|footer|header|legal|social', re.I)
     for tag in soup.find_all(class_=noise_classes): tag.decompose()
     return soup
-
-def parse_price(value):
-    """Macht aus '24.000', '24k', '24.0' eine saubere Zahl 24000"""
-    try:
-        if isinstance(value, int): return value
-        if isinstance(value, float): 
-            # Wenn 24.0 -> wahrscheinlich 24000 gemeint, wenn Kontext Auto ist? 
-            # Nein, KI könnte 24.000 gemeint haben.
-            # Sicherer: Wenn < 1000, mal 1000 nehmen? Riskant.
-            # Besser: Wir zwingen KI im Prompt zu Integers.
-            return int(value)
-        
-        if isinstance(value, str):
-            clean = value.lower().replace('k', '000').replace('.', '').replace(',', '')
-            match = re.search(r'\d+', clean)
-            if match:
-                return int(match.group(0))
-    except: pass
-    return 0
 
 def extract_structured_data(soup):
     data = {}
@@ -106,8 +86,7 @@ def send_telegram_message(chat_id, text, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
+    if reply_markup: payload["reply_markup"] = reply_markup
     requests.post(url, json=payload)
 
 # --- CORE LOGIC ---
@@ -151,34 +130,40 @@ def run_analysis_logic(url: str, lang: str = "de"):
 
     title = structured.get('title') or "Fahrzeug"
     image_url = structured.get('image')
-    price = parse_price(structured.get('price', 0))
+    
+    # Preis & KM Parsing
+    price = 0
+    if structured.get('price'): price = int(float(structured['price']))
+    
     km = 0
     if structured.get('km'): km = int(float(structured['km']))
     elif "km" in tech_data_text:
         km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*km', tech_data_text, re.IGNORECASE)
         if km_match: km = int(km_match.group(1).replace('.', ''))
 
-    # 2. KI (Vision & Text)
+    # 2. KI (Vision & Text) mit STRUCTURED OUTPUTS
     valid_image_url = image_url if image_url and "http" in image_url else None
     client = OpenAI(api_key=OPENAI_API_KEY)
     
-    # PROMPT UPDATE: Faktenbasiert & Integer-Zwang
+    # --- NEUER PROMPT NACH FEEDBACK ---
     system_instruction = f"""
-    You are a professional automotive expert and valuation analyst.
-    Language: {lang.upper()} (Output ONLY in {lang.upper()}).
+    You are a professional automotive valuation expert.
+    Language: Output ONLY in {lang.upper()}.
 
-    TASK:
-    Analyze the car deal based on FACTS:
-    1. Depreciation: Is the price appropriate for the age/KM?
-    2. Equipment: Does it lack standard features for this class? (e.g. "Missing Navi in luxury class").
-    3. Market: Is it a "shelf warmer" (Standuhr)?
-    
-    CRITICAL RULES:
-    - 'market_price_estimate' MUST be a plain INTEGER (e.g. 24500). NO dots, NO 'k'.
-    - Arguments must be logical and specific to the car data.
-    - Script must be professional but firm.
-    
-    Output JSON keys: "rating" (EXPENSIVE/FAIR/GOOD_DEAL), "arguments" (List of 3 strings), "script" (String), "market_price_estimate" (Integer).
+    FACT-BASED RULES (CRITICAL):
+    1. Use ONLY provided data. Do NOT invent service records or accidents.
+    2. If equipment is missing in text, assume "Standard Equipment" - do NOT assume it's missing unless it's unusual for the price.
+    3. MARKET INDICATORS:
+       - "Shelf warmer" (Standuhr) ONLY if evidence exists (e.g. old ad date).
+       - Rating definitions: 
+         * EXPENSIVE: >10% above market.
+         * FAIR: +/- 10% market average.
+         * GOOD_DEAL: >10% below market.
+
+    OUTPUT STRUCTURE:
+    - 'arguments' MUST be EXACTLY 3 strings.
+    - Start arguments with prefixes: "Depreciation:", "Equipment:", "Market:".
+    - 'market_price_estimate' MUST be a clean Integer.
     """
 
     user_message_content = [{
@@ -189,27 +174,54 @@ def run_analysis_logic(url: str, lang: str = "de"):
     if valid_image_url:
         user_message_content.append({
             "type": "image_url",
-            "image_url": {"url": valid_image_url, "detail": "low"}
+            "image_url": {"url": valid_image_url, "detail": "high"} # Upgrade auf HIGH für bessere Erkennung
         })
 
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": system_instruction}, {"role": "user", "content": user_message_content}],
-            response_format={ "type": "json_object" }
+            # --- NEU: STRICT JSON SCHEMA ---
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "car_analysis",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "rating": {"type": "string", "enum": ["EXPENSIVE", "FAIR", "GOOD_DEAL"]},
+                            "arguments": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 3, # Wir zwingen die KI zu exakt 3 Argumenten
+                                "maxItems": 3
+                            },
+                            "script": {"type": "string"},
+                            "market_price_estimate": {"type": "integer"} # Zwingend Integer!
+                        },
+                        "required": ["rating", "arguments", "script", "market_price_estimate"],
+                        "additionalProperties": False
+                    }
+                }
+            }
         )
-        # Direktes Ergebnis (kein nested 'de'/'en' mehr nötig, da wir Sprache im Prompt setzen)
         ai_result = json.loads(completion.choices[0].message.content)
     except Exception as e:
         print(f"KI Error: {e}")
-        ai_result = {}
+        # Sicherer Fallback
+        ai_result = {
+            "rating": "FAIR",
+            "arguments": ["Daten konnten nicht vollständig analysiert werden.", "Bitte manuell prüfen.", "Preis scheint marktüblich."],
+            "script": "Ich habe mir das Auto angesehen. Können wir über den Preis sprechen?",
+            "market_price_estimate": price
+        }
 
-    # Datenstruktur für Frontend normalisieren (damit Frontend nicht bricht)
+    # Datenstruktur für Frontend normalisieren
     final_output = {
         "meta": { "title": title, "url": url, "image": image_url },
         "data": { "price": price, "km": km },
         "analysis": {
-            # Wir packen das Ergebnis in beide Keys, damit das Frontend immer was findet
             "de": ai_result, 
             "en": ai_result 
         }
@@ -220,8 +232,8 @@ def run_analysis_logic(url: str, lang: str = "de"):
         est = ai_result.get("market_price_estimate", price)
         supabase.table("scans").insert({
             "url": str(url), "title": str(title), "price": int(price),
-            "ai_market_estimate": int(est) if est else 0, 
-            "rating": str(ai_result.get("rating", "fair"))
+            "ai_market_estimate": int(est), 
+            "rating": str(ai_result.get("rating", "FAIR"))
         }).execute()
     except: pass
 
@@ -230,11 +242,10 @@ def run_analysis_logic(url: str, lang: str = "de"):
 # --- ENDPOINTS ---
 
 @app.get("/")
-def read_root(): return {"status": "Deal Anwalt Online"}
+def read_root(): return {"status": "Deal Anwalt Online v3.0 (Strict)"}
 
 @app.post("/analyze")
 def analyze_endpoint(request: CarRequest):
-    # Frontend ruft das auf (Standard DE vorerst, oder wir erweitern Request)
     return run_analysis_logic(request.url, "de")
 
 # --- TELEGRAM BOT ---
@@ -243,79 +254,63 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         
-        # 1. CALLBACK QUERY (Button Klick)
+        # 1. CALLBACK QUERY
         if "callback_query" in data:
             cb = data["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             action = cb["data"]
-            
             if action in ["lang_de", "lang_en"]:
                 lang = "de" if action == "lang_de" else "en"
                 USER_LANGUAGES[chat_id] = lang
-                # Bestätigung senden
-                msg = "🇩🇪 Sprache auf Deutsch gesetzt! Schick mir einen Link." if lang == "de" else "🇺🇸 Language set to English! Send me a link."
+                msg = "🇩🇪 Sprache: Deutsch" if lang == "de" else "🇺🇸 Language: English"
                 send_telegram_message(chat_id, msg)
-                # Callback schließen (wichtig für Telegram UX)
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
             return {"status": "ok"}
 
-        # 2. NORMALE NACHRICHT
+        # 2. MESSAGE
         if "message" not in data: return {"status": "ok"}
         
         message = data["message"]
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
         
-        # START COMMAND
         if text == "/start":
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "🇩🇪 Deutsch", "callback_data": "lang_de"},
-                    {"text": "🇺🇸 English", "callback_data": "lang_en"}
-                ]]
-            }
-            send_telegram_message(chat_id, "Welcome! Please choose your language / Bitte wähle deine Sprache:", reply_markup=keyboard)
+            keyboard = {"inline_keyboard": [[{"text": "🇩🇪 Deutsch", "callback_data": "lang_de"}, {"text": "🇺🇸 English", "callback_data": "lang_en"}]]}
+            send_telegram_message(chat_id, "Bitte wähle deine Sprache / Choose language:", reply_markup=keyboard)
             return {"status": "ok"}
 
-        # LINK CHECK
         url_match = re.search(r'(https?://[^\s]+)', text)
         if not url_match:
-            send_telegram_message(chat_id, "Bitte schick mir einen Link von Mobile.de oder AutoScout24.\n(Oder tippe /start um die Sprache zu ändern).")
+            send_telegram_message(chat_id, "Bitte Link senden oder /start für Sprache.")
             return {"status": "ok"}
             
         url = url_match.group(1)
+        user_lang = USER_LANGUAGES.get(chat_id, "de")
         
-        # SPRACHE LADEN
-        user_lang = USER_LANGUAGES.get(chat_id, "de") # Default Deutsch
-        
-        waiting_msg = "🕵️‍♂️ Analysiere..." if user_lang == "de" else "🕵️‍♂️ Analyzing..."
-        send_telegram_message(chat_id, waiting_msg)
+        send_telegram_message(chat_id, "🕵️‍♂️..." if user_lang == "de" else "🕵️‍♂️ Analyzing...")
 
         try:
-            # Analyse läuft...
             result = run_analysis_logic(url, user_lang)
+            ai_data = result["analysis"]["de"] # Ist jetzt die korrekte Sprache
             
-            # Ergebnis holen
-            # Da run_analysis_logic jetzt "de" und "en" gleich befüllt (mit der gewählten Sprache), nehmen wir einfach 'de' Key
-            ai_data = result["analysis"]["de"] 
-            
-            est_price = parse_price(ai_data.get("market_price_estimate", 0))
+            est_price = ai_data.get("market_price_estimate", 0)
             curr_price = result["data"]["price"]
-            rating = ai_data.get("rating", "INFO")
+            rating = ai_data.get("rating", "FAIR")
             
-            # Diff berechnen
             diff = curr_price - est_price
             
-            # Text bauen
             if user_lang == "de":
                 msg = f"🚗 *{result['meta']['title']}*\n\n"
                 msg += f"💶 Aktuell: `{curr_price:,.0f} €`\n".replace(",", ".")
                 msg += f"⚖️ Schätzung: `{est_price:,.0f} €`\n".replace(",", ".")
                 msg += f"📊 Rating: *{rating}*\n\n"
                 if diff > 0: msg += f"📉 *Verhandle um: -{diff:,.0f} €*\n\n".replace(",", ".")
-                else: msg += f"✅ *Preis ist gut!*\n\n"
-                msg += "🔥 *Argumente:*\n"
-                for arg in ai_data.get("arguments", []): msg += f"• {arg}\n"
+                else: msg += f"✅ *Guter Preis!*\n\n"
+                msg += "🔥 *Fakten-Check:*\n"
+                for arg in ai_data.get("arguments", []): 
+                    # Formatierung verbessern
+                    clean_arg = arg.replace("Depreciation:", "📉").replace("Equipment:", "🛠").replace("Market:", "📊")
+                    msg += f"{clean_arg}\n"
                 msg += f"\n💬 *Script:*\n_{ai_data.get('script')}_"
             else:
                 msg = f"🚗 *{result['meta']['title']}*\n\n"
@@ -324,16 +319,17 @@ async def telegram_webhook(request: Request):
                 msg += f"📊 Rating: *{rating}*\n\n"
                 if diff > 0: msg += f"📉 *Negotiate: -{diff:,} €*\n\n"
                 else: msg += f"✅ *Good Price!*\n\n"
-                msg += "🔥 *Arguments:*\n"
-                for arg in ai_data.get("arguments", []): msg += f"• {arg}\n"
+                msg += "🔥 *Facts:*\n"
+                for arg in ai_data.get("arguments", []): 
+                     clean_arg = arg.replace("Depreciation:", "📉").replace("Equipment:", "🛠").replace("Market:", "📊")
+                     msg += f"{clean_arg}\n"
                 msg += f"\n💬 *Script:*\n_{ai_data.get('script')}_"
 
             send_telegram_message(chat_id, msg)
             
         except Exception as e:
-            err_msg = "⚠️ Fehler beim Abruf." if user_lang == "de" else "⚠️ Error fetching data."
             print(f"Error: {e}")
-            send_telegram_message(chat_id, err_msg)
+            send_telegram_message(chat_id, "⚠️ Error.")
 
     except Exception as e:
         print(f"Webhook Error: {e}")
