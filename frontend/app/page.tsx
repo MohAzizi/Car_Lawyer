@@ -22,7 +22,7 @@ const UI_TEXTS = {
     script: "Sag genau das:",
     footer: "Keine Rechtsberatung. Nur für Bildungszwecke.",
     features: ["KI-Preisanalyse", "Ausstattungs-Check", "Verhandlungs-Skripte"],
-    telegramBtn: "Bot nutzen"
+    telegramBtn: "Telegram nutzen"
   },
   en: {
     title: "Deal Lawyer",
@@ -38,7 +38,7 @@ const UI_TEXTS = {
     script: "Say exactly this:",
     footer: "No legal advice. Educational purposes only.",
     features: ["AI Price Analysis", "Equipment Check", "Negotiation Scripts"],
-    telegramBtn: "Use Bot"
+    telegramBtn: "Use Telegram"
   }
 };
 
