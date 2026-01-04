@@ -172,39 +172,65 @@ def analyze_car(request: CarRequest):
              if km_match: km = int(km_match.group(1).replace('.', ''))
 
         # 2. KI ANALYSE
+
+        # --- NEU: BILD URL PRÜFEN ---
+        # Wir stellen sicher, dass wir ein echtes Bild haben, sonst crasht OpenAI
+        valid_image_url = image_url if image_url and "http" in image_url else None
+
+        # 2. KI ANALYSE (JETZT MIT VISION 👀)
         client = OpenAI(api_key=OPENAI_API_KEY)
         
         system_instruction = """
-        You are an expert car negotiator.
-        Analyze the raw description text to identify negotiation points.
+        You are a ruthless car dealer purchasing expert. 
+        Your goal: Devalue the car to negotiate the best price.
         
-        CRITICAL: 
-        1. The text might be messy. Look for keywords: "Sitzheizung", "Leder", "Navi", "ACC", "LED", "Scheckheft".
-        2. If you find these features, ACKNOWLEDGE them. Do NOT say they are missing.
-        3. Only argue "missing features" if the text really looks like a base model.
+        INPUT DATA:
+        1. Car details (Price, KM, Year)
+        2. Raw Description Text
+        3. AN IMAGE OF THE CAR (Analyze this visually!)
+
+        STRATEGY:
+        - Look at the image: Are there dents, scratches, bad rims, worn seats, or mismatched colors? Mention them!
+        - Look at the text: Does it miss key features (Navi, Leather, ACC)?
+        - Do the math: Is the price too high for the KM/Year?
         
         OUTPUT FORMAT (JSON):
         Returns keys "de" and "en".
-        Each contains: rating, arguments (array), script, market_price_estimate.
+        Each contains: rating (expensive/fair/good), arguments (array of 3 hard-hitting points), script (1 aggressive sentence), market_price_estimate (number).
         """
 
-        user_prompt = f"""
-        Car: {title}
-        Price: {price} EUR
-        KM: {km}
+        # Der User-Prompt ist jetzt ein Array aus Text UND Bild
+        user_message_content = [
+            {
+                "type": "text", 
+                "text": f"""
+                ANALYZE THIS CAR:
+                Title: {title}
+                Price: {price} EUR
+                KM: {km}
+                
+                RAW DESCRIPTION TEXT:
+                "{raw_text_for_ai}"
+                """
+            }
+        ]
         
-        RAW TEXT (Scraped & Cleaned):
-        "{raw_text_for_ai}"
-
-        Generate dual-language JSON analysis.
-        """
+        # Nur wenn ein Bild da ist, fügen wir es hinzu
+        if valid_image_url:
+            user_message_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": valid_image_url,
+                    "detail": "low" # 'low' ist billiger & schneller, reicht für Grob-Analyse
+                }
+            })
 
         try:
             completion = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o-mini", # 4o-mini kann Bilder sehen!
                 messages=[
                     {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": user_message_content}
                 ],
                 response_format={ "type": "json_object" }
             )
