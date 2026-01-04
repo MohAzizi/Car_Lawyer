@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+// Wir importieren Icons. Falls lucide-react fehlt, würde das hier crashen.
+// Stell sicher, dass du 'npm install lucide-react' im frontend Ordner ausgeführt hast.
 import { Search, Gauge, AlertTriangle, CheckCircle, ArrowRight, Globe } from "lucide-react";
 
 // --- UI TEXTE ---
@@ -44,37 +46,44 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lang, setLang] = useState<"de" | "en">("de");
 
+  // Safety Fallback für UI Texte
   const ui = UI_TEXTS[lang] || UI_TEXTS.de;
+  
+  // URL Fallback
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
   // --- SICHERE ZAHLEN-PARSING FUNKTION ---
+  // Diese Funktion stürzt nie ab, egal was reinkommt.
   const getSafeNumber = (val: any): number => {
-    if (typeof val === 'number') return val;
-    if (!val) return 0;
-    
-    if (typeof val === 'string') {
-        // Entferne Punkte (Tausender) und Kommas
-        const clean = val.replace(/\./g, '').replace(/,/g, '');
+    try {
+        if (typeof val === 'number') return val;
+        if (!val) return 0;
         
-        // Suche die ERSTE logische Zahl im Text (min 3 Ziffern)
-        // Das verhindert, dass "20.000 - 25.000" zu "2000025000" verschmilzt
-        const match = clean.match(/(\d{3,})/);
-        if (match) {
-            const num = parseInt(match[0]);
-            // Plausibilitäts-Check: Kein Auto kostet über 5 Millionen Euro hier
-            // Wenn die Zahl riesig ist (Parse-Fehler), gib 0 zurück
-            if (num > 5000000) return 0;
-            return num;
+        if (typeof val === 'string') {
+            // "25.000 €" -> "25000"
+            const clean = val.replace(/\./g, '').replace(/,/g, '');
+            // Suche erste Zahlengruppe
+            const match = clean.match(/(\d{3,})/);
+            if (match) {
+                const num = parseInt(match[0]);
+                // Sanity Check: Kein Auto kostet über 5 Mio (verhindert Parse-Fehler)
+                if (num > 5000000) return 0;
+                return num;
+            }
         }
+    } catch (e) {
+        return 0; // Im Zweifel 0 zurückgeben
     }
     return 0;
   };
 
   const analyzeCar = async () => {
     const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
-    const isValid = validDomains.some(domain => url.toLowerCase().includes(domain));
+    // Safety check falls url null ist
+    const safeUrl = url || "";
+    const isValid = validDomains.some(domain => safeUrl.toLowerCase().includes(domain));
 
-    if (!isValid && url.length > 0) {
+    if (!isValid && safeUrl.length > 0) {
        setError(lang === "de" 
          ? "Bitte einen Link von Mobile.de, AutoScout24 oder Kleinanzeigen nutzen." 
          : "Please use a link from Mobile.de, AutoScout24, or Kleinanzeigen.");
@@ -89,19 +98,21 @@ export default function Home() {
       const res = await fetch(`${API_URL}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }), 
+        body: JSON.stringify({ url: safeUrl }), 
       });
 
-      if (!res.ok) throw new Error("Server Error");
+      if (!res.ok) throw new Error("Server Error: " + res.statusText);
       const data = await res.json();
       setReport(data);
     } catch (err) {
-      setError(lang === "de" ? "Fehler bei der Analyse. Ist der Link korrekt?" : "Analysis failed. Is the link correct?");
+      console.error(err); // Fehler in Konsole loggen
+      setError(lang === "de" ? "Fehler bei der Analyse. Ist der Server online?" : "Analysis failed. Is the server running?");
     } finally {
       setLoading(false);
     }
   };
 
+  // Sicheres Abrufen der Analysedaten
   const getAnalysisData = () => {
     if (!report || !report.analysis) return null;
     return report.analysis[lang] || report.analysis['de'] || report.analysis; 
@@ -109,23 +120,28 @@ export default function Home() {
 
   const analysis = getAnalysisData();
 
-  // --- EINFACHE BERECHNUNG (Ohne Hooks) ---
+  // --- BERECHNUNG (Sicher verpackt) ---
   let currentPrice = 0;
   let estimatedPrice = 0;
   let diff = 0;
+  let displayEstimate = "---";
 
+  // Wir berechnen das nur, wenn Daten da sind
   if (report && analysis) {
-      // 1. Daten holen & bereinigen
-      currentPrice = getSafeNumber(report?.data?.price);
-      estimatedPrice = getSafeNumber(analysis?.market_price_estimate);
+      try {
+          currentPrice = getSafeNumber(report?.data?.price);
+          estimatedPrice = getSafeNumber(analysis?.market_price_estimate);
 
-      // 2. Sicherheits-Check: Wenn Schätzung fehlt oder > 5 Mio (Fehler), nimm aktuellen Preis
-      if (estimatedPrice < 100 || estimatedPrice > 5000000) {
-          estimatedPrice = currentPrice;
+          // Fallback Logik
+          if (estimatedPrice < 100 || estimatedPrice > 5000000) {
+              estimatedPrice = currentPrice;
+          }
+
+          diff = currentPrice - estimatedPrice;
+          displayEstimate = estimatedPrice.toLocaleString();
+      } catch (e) {
+          console.error("Berechnungsfehler", e);
       }
-
-      // 3. Differenz
-      diff = currentPrice - estimatedPrice;
   }
 
   return (
@@ -135,7 +151,7 @@ export default function Home() {
       <nav className="flex justify-between items-center p-6 max-w-5xl mx-auto">
         <div className="flex items-center gap-2 font-bold text-xl tracking-tight">
           <Gauge className="text-indigo-600" />
-          <span>{ui.title}</span>
+          <span>{ui?.title || "Deal Anwalt"}</span>
         </div>
         <button 
           onClick={() => setLang(lang === "de" ? "en" : "de")}
@@ -151,10 +167,10 @@ export default function Home() {
         {/* HERO */}
         <div className="text-center mb-10 space-y-4">
           <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 tracking-tight leading-tight">
-            {ui.subtitle}
+            {ui?.subtitle}
           </h1>
           <div className="flex flex-wrap justify-center gap-3 text-sm text-slate-600 pt-2">
-            {ui.features.map((feat, i) => (
+            {ui?.features && ui.features.map((feat: string, i: number) => (
               <span key={i} className="bg-white border border-slate-200 px-3 py-1 rounded-full shadow-sm flex items-center gap-1">
                 <CheckCircle size={14} className="text-green-500" /> {feat}
               </span>
@@ -168,7 +184,7 @@ export default function Home() {
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
             <input
               type="text"
-              placeholder={ui.placeholder}
+              placeholder={ui?.placeholder}
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               className="w-full pl-12 pr-4 py-4 rounded-xl outline-none text-lg text-slate-700 placeholder:text-slate-400"
@@ -179,7 +195,7 @@ export default function Home() {
             disabled={loading}
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-indigo-200"
           >
-            {loading ? <span className="animate-spin">⏳</span> : <>{ui.button} <ArrowRight size={20} /></>}
+            {loading ? <span className="animate-spin">⏳</span> : <>{ui?.button} <ArrowRight size={20} /></>}
           </button>
         </div>
 
@@ -231,27 +247,27 @@ export default function Home() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 text-center">
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
-                    {ui.actualPrice}
+                    {ui?.actualPrice}
                   </p>
                   <p className="text-3xl font-black text-slate-900">{currentPrice.toLocaleString()} €</p>
                 </div>
                 <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
-                  <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-1">{ui.marketValue}</p>
-                  <p className="text-3xl font-black text-indigo-700">{estimatedPrice.toLocaleString()} €</p>
+                  <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-1">{ui?.marketValue}</p>
+                  <p className="text-3xl font-black text-indigo-700">{displayEstimate} €</p>
                 </div>
               </div>
 
               {/* NEGOTIATION BOX */}
               <div className="bg-gradient-to-br from-indigo-600 to-violet-700 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
                 <div className="relative z-10">
-                  <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui.savings}</p>
+                  <p className="text-indigo-200 text-sm font-bold uppercase tracking-wider mb-1">{ui?.savings}</p>
                   
                   <p className="text-4xl font-extrabold mb-6">
                      {diff > 0 ? "-" : "+"}{Math.abs(diff).toLocaleString()} €
                   </p>
                   
                   <h3 className="font-bold text-white mb-3 flex items-center gap-2">
-                    {ui.ammo}
+                    {ui?.ammo}
                   </h3>
                   <ul className="space-y-3 text-indigo-100 text-sm mb-6">
                     {Array.isArray(analysis?.arguments) && analysis.arguments.map((arg: string, index: number) => (
@@ -262,7 +278,7 @@ export default function Home() {
                   </ul>
 
                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/10">
-                    <p className="text-[10px] font-bold text-indigo-200 uppercase mb-2">{ui.script}</p>
+                    <p className="text-[10px] font-bold text-indigo-200 uppercase mb-2">{ui?.script}</p>
                     <p className="italic text-white">"{analysis?.script || "..."}"</p>
                   </div>
                 </div>
@@ -274,7 +290,7 @@ export default function Home() {
       </main>
 
       <footer className="text-center p-8 text-slate-400 text-sm">
-        <p>© {new Date().getFullYear()} {ui.title}. {ui.footer}</p>
+        <p>© {new Date().getFullYear()} {ui?.title}. {ui?.footer}</p>
       </footer>
     </div>
   );
