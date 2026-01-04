@@ -59,33 +59,40 @@ def parse_price_string(price_str):
     clean = re.sub(r'[^\d]', '', str(price_str))
     return int(clean) if clean else 0
 
-def extract_data_fallback(soup, url):
-    """Fallback Scraper, wenn JSON-LD versagt (Speziell für Mobile.de)"""
+def extract_mobile_de_fallback(soup):
+    """Spezial-Extraktion für Mobile.de über Meta-Tags (Robuster gegen Blocking)"""
     data = {}
     
-    # 1. PREIS SUCHE (Mobile.de spezifisch & Generisch)
-    # Mobile.de nutzt oft data-testid="prime-price" oder Klassen
-    price_candidate = soup.find(attrs={"data-testid": "prime-price"})
-    if not price_candidate:
-        price_candidate = soup.find(class_=re.compile(r"Price-magnitude|g-price", re.I))
+    # 1. Preis aus Meta-Tags oder spezifischen Attributen
+    # Mobile nutzt oft 'og:price:amount' oder spezifische data-testids
+    price_meta = soup.find("meta", property="product:price:amount")
+    if not price_meta:
+        price_meta = soup.find("meta", property="og:price:amount")
     
-    if price_candidate:
-        data['price'] = parse_price_string(price_candidate.get_text())
-    
-    # 2. KM SUCHE
-    # Oft in 'g-col-6' oder 'item-value'
-    # Wir suchen nach Texten, die "km" enthalten
-    if "mobile.de" in url:
-        # Mobile.de spezifischer Text-Scan in den Attribut-Boxen
-        details = soup.find_all(attrs={"data-testid": "item-value"})
-        for d in details:
-            txt = d.get_text()
-            if "km" in txt: data['km'] = parse_price_string(txt)
-            if "kW" in txt or "PS" in txt: data['power'] = txt
-            
-    # 3. TITEL
-    h1 = soup.find('h1')
-    if h1: data['title'] = clean_text(h1.get_text())
+    if price_meta and price_meta.get("content"):
+        data['price'] = parse_price_string(price_meta["content"])
+    else:
+        # Versuche HTML Fallback
+        price_el = soup.find(attrs={"data-testid": "prime-price"})
+        if price_el: data['price'] = parse_price_string(price_el.get_text())
+
+    # 2. Titel
+    title_meta = soup.find("meta", property="og:title")
+    if title_meta: data['title'] = title_meta["content"]
+
+    # 3. Bild
+    img_meta = soup.find("meta", property="og:image")
+    if img_meta: data['image'] = img_meta["content"]
+
+    # 4. KM und Daten aus Description Meta (Oft steht da: "BMW 320d, 150.000 km...")
+    desc_meta = soup.find("meta", property="og:description")
+    if desc_meta:
+        desc_text = desc_meta["content"]
+        data['description'] = desc_text
+        # KM suchen
+        km_match = re.search(r'(\d{1,3}(?:\.?\d{3})*)\s*km', desc_text, re.IGNORECASE)
+        if km_match:
+            data['km'] = int(km_match.group(1).replace('.', ''))
     
     return data
 
@@ -127,64 +134,75 @@ def send_telegram_message(chat_id, text, reply_markup=None):
 def run_analysis_logic(url: str, lang: str = "de"):
     print(f"⚙️ Core Logic läuft für: {url} (Sprache: {lang})")
     
-    # 1. SCRAPING
+    # 1. SCRAPING (Optimiert für Mobile.de)
     params = {
         'api_key': SCRAPINGBEE_API_KEY,
         'url': url,
         'render_js': 'True', 
         'premium_proxy': 'True', 
         'country_code': 'de',
-        # WICHTIG FÜR MOBILE.DE: Länger warten
-        'wait_browser': 'networkidle2', 
-        'block_resources': 'False', # Mobile.de braucht manchmal CSS zum Rendern
+        # WICHTIG: Stealth Proxy aktiviert spezielle Anti-Bot Umgehung
+        'stealth_proxy': 'True', 
+        'wait_browser': 'domcontentloaded', # Schneller, oft reicht das
+        'block_resources': 'False', 
         'block_ads': 'True'
     }
 
-    response = requests.get('https://app.scrapingbee.com/api/v1/', params=params)
-    if response.status_code != 200: 
-        # Fallback Fehlerbehandlung
-        raise Exception(f"Scraping fehlgeschlagen: {response.status_code}")
+    try:
+        response = requests.get('https://app.scrapingbee.com/api/v1/', params=params)
+        
+        # Fehlerbehandlung wenn ScrapingBee blockiert wird
+        if response.status_code != 200:
+            print(f"⚠️ ScrapingBee Error: {response.status_code} - {response.text}")
+            # Wir werfen keinen harten Fehler, sondern versuchen es mit Dummy-Daten, 
+            # damit das Frontend nicht 'Application Error' wirft, sondern eine Nachricht.
+            raise Exception("Seite konnte nicht geladen werden (Bot-Schutz).")
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    
-    # Daten Extraktion (Versuch 1: JSON-LD, Versuch 2: Fallback HTML)
-    structured = extract_structured_data(soup)
-    fallback = extract_data_fallback(soup, url)
-    
-    # Daten mergen (Structured > Fallback)
-    title = structured.get('title') or fallback.get('title') or "Fahrzeug"
-    price = int(float(structured.get('price') or fallback.get('price') or 0))
-    km = int(float(structured.get('km') or fallback.get('km') or 0))
-    image_url = structured.get('image')
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extraktion
+        structured = extract_structured_data(soup)
+        mobile_fallback = extract_mobile_de_fallback(soup) # Neuer Fallback
+        
+        # Zusammenführen (Structured > Mobile Fallback > Default)
+        title = structured.get('title') or mobile_fallback.get('title') or "Fahrzeug"
+        price = int(float(structured.get('price') or mobile_fallback.get('price') or 0))
+        km = int(float(structured.get('km') or mobile_fallback.get('km') or 0))
+        image_url = structured.get('image') or mobile_fallback.get('image')
 
-    # Text Cleanup für KI
-    soup = remove_noise(soup)
-    full_text = clean_text(soup.body.get_text())[:12000] # Mehr Kontext zulassen
-    
+        # Text für KI
+        # Wenn wir keinen Body-Text haben (weil Blocked), nehmen wir die Meta-Description
+        soup = remove_noise(soup)
+        body_text = clean_text(soup.body.get_text())[:12000]
+        meta_desc = mobile_fallback.get('description', '')
+        
+        full_text = f"META INFO: {meta_desc}\n\nPAGE CONTENT: {body_text}"
+        
+    except Exception as e:
+        print(f"Scraping Critical Error: {e}")
+        # Notfall-Fallback, damit Frontend nicht abstürzt
+        title = "Analyse fehlgeschlagen"
+        price = 0
+        km = 0
+        image_url = None
+        full_text = "Fehler beim Laden der Seite."
+
     # 2. KI ANALYSE
     valid_image_url = image_url if image_url and "http" in image_url else None
     client = OpenAI(api_key=OPENAI_API_KEY)
     
-    # --- PROMPT: AGGRESSIVER VERHANDLER ---
-    # Wir zwingen die KI, den Preis zu senken, wenn es kein "GOOD_DEAL" ist.
     system_instruction = f"""
-    You are a professional buyer's agent for used cars.
-    Language: Output ONLY in {lang.upper()}.
+    You are a professional buyer's agent. Output ONLY in {lang.upper()}.
 
     YOUR MISSION:
-    Determine a realistic NEGOTIATION TARGET PRICE, not just the market average.
+    Determine a realistic NEGOTIATION TARGET PRICE.
     
-    PRICE RULES (CRITICAL):
-    1. If the car is rated "EXPENSIVE": Target Price MUST be 10-15% below asking price.
-    2. If the car is rated "FAIR": Target Price MUST be 4-8% below asking price.
-    3. If the car is "GOOD_DEAL": Target Price can be equal to asking price.
-    4. NEVER output the exact asking price unless it is explicitly a "GOOD_DEAL".
+    PRICE RULES:
+    1. If rating "EXPENSIVE": Target MUST be 10-15% below asking.
+    2. If rating "FAIR": Target MUST be 4-8% below asking.
+    3. If rating "GOOD_DEAL": Target can be equal asking.
+    4. If price is 0 (scrape error), estimate purely based on car title if possible, or set to 0.
     
-    ANALYSIS RULES:
-    - Look for missing equipment in the text (Navi, Leather, ACC, LED).
-    - Check Mileage vs Age (High mileage = price reduction).
-    - 'market_price_estimate' MUST be an Integer (the negotiation target).
-
     Output JSON strict format:
     {{
         "rating": "EXPENSIVE" | "FAIR" | "GOOD_DEAL",
@@ -233,9 +251,9 @@ def run_analysis_logic(url: str, lang: str = "de"):
         print(f"KI Error: {e}")
         ai_result = {
             "rating": "FAIR",
-            "arguments": ["Daten unklar", "Preis manuell prüfen", "Vergleich schwierig"],
-            "script": "Bitte prüfen Sie den Preis manuell.",
-            "market_price_estimate": int(price * 0.95) # Fallback 5% Rabatt
+            "arguments": ["Link konnte nicht vollständig gelesen werden.", "Bitte Daten manuell prüfen.", "Mobile.de Blockade möglich."],
+            "script": "Konnte das Fahrzeug nicht analysieren.",
+            "market_price_estimate": price
         }
 
     final_output = {
@@ -257,7 +275,7 @@ def run_analysis_logic(url: str, lang: str = "de"):
 
 # --- ENDPOINTS ---
 @app.get("/")
-def read_root(): return {"status": "Deal Anwalt Online v3.1 (Mobile Fix + Price Logic)"}
+def read_root(): return {"status": "Deal Anwalt Online v3.2 (Stealth Mode)"}
 
 @app.post("/analyze")
 def analyze_endpoint(request: CarRequest):
@@ -335,6 +353,6 @@ async def telegram_webhook(request: Request):
             send_telegram_message(chat_id, msg)
         except Exception as e:
             print(f"Error: {e}")
-            send_telegram_message(chat_id, "⚠️ Fehler beim Abruf. Mobile.de blockiert evtl. oder Link ungültig.")
+            send_telegram_message(chat_id, "⚠️ Fehler beim Abruf.")
     except: pass
     return {"status": "ok"}
