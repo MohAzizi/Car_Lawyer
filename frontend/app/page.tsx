@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-// Wir importieren Icons. Falls lucide-react fehlt, würde das hier crashen.
-// Stell sicher, dass du 'npm install lucide-react' im frontend Ordner ausgeführt hast.
-import { Search, Gauge, AlertTriangle, CheckCircle, ArrowRight, Globe } from "lucide-react";
+import { Search, Gauge, AlertTriangle, CheckCircle, ArrowRight, Globe, Send } from "lucide-react";
 
-// --- UI TEXTE ---
+// --- KONFIGURATION ---
+// ÄNDERE DAS ZU DEINEM BOT NAMEN!
+const TELEGRAM_BOT_URL = "https://t.me/DealLawyer_bot"; 
+
 const UI_TEXTS = {
   de: {
     title: "Deal Anwalt",
@@ -14,13 +15,14 @@ const UI_TEXTS = {
     button: "Kostenlos Checken",
     loading: "Analysiere Marktdaten & Ausstattung...",
     resultTitle: "Analyse Ergebnis",
-    marketValue: "Marktwert Schätzung",
-    actualPrice: "Aktueller Preis",
+    marketValue: "Verhandlungs-Zielpreis", // Wording Änderung für Realismus
+    actualPrice: "Händler Preis",
     savings: "Dein Verhandlungspotenzial",
     ammo: "🔥 Deine Munition:",
     script: "Sag genau das:",
     footer: "Keine Rechtsberatung. Nur für Bildungszwecke.",
-    features: ["KI-Preisanalyse", "Ausstattungs-Check", "Verhandlungs-Skripte"]
+    features: ["KI-Preisanalyse", "Ausstattungs-Check", "Verhandlungs-Skripte"],
+    telegramBtn: "Bot nutzen"
   },
   en: {
     title: "Deal Lawyer",
@@ -29,13 +31,14 @@ const UI_TEXTS = {
     button: "Check for Free",
     loading: "Analyzing market data & equipment...",
     resultTitle: "Analysis Result",
-    marketValue: "Estimated Market Value",
-    actualPrice: "Current Price",
+    marketValue: "Target Negotiation Price", // Wording Change
+    actualPrice: "Dealer Price",
     savings: "Negotiation Potential",
     ammo: "🔥 Your Ammo:",
     script: "Say exactly this:",
     footer: "No legal advice. Educational purposes only.",
-    features: ["AI Price Analysis", "Equipment Check", "Negotiation Scripts"]
+    features: ["AI Price Analysis", "Equipment Check", "Negotiation Scripts"],
+    telegramBtn: "Use Bot"
   }
 };
 
@@ -46,40 +49,28 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lang, setLang] = useState<"de" | "en">("de");
 
-  // Safety Fallback für UI Texte
   const ui = UI_TEXTS[lang] || UI_TEXTS.de;
-  
-  // URL Fallback
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-  // --- SICHERE ZAHLEN-PARSING FUNKTION ---
-  // Diese Funktion stürzt nie ab, egal was reinkommt.
   const getSafeNumber = (val: any): number => {
     try {
         if (typeof val === 'number') return val;
         if (!val) return 0;
-        
         if (typeof val === 'string') {
-            // "25.000 €" -> "25000"
             const clean = val.replace(/\./g, '').replace(/,/g, '');
-            // Suche erste Zahlengruppe
             const match = clean.match(/(\d{3,})/);
             if (match) {
                 const num = parseInt(match[0]);
-                // Sanity Check: Kein Auto kostet über 5 Mio (verhindert Parse-Fehler)
                 if (num > 5000000) return 0;
                 return num;
             }
         }
-    } catch (e) {
-        return 0; // Im Zweifel 0 zurückgeben
-    }
+    } catch (e) { return 0; }
     return 0;
   };
 
   const analyzeCar = async () => {
     const validDomains = ["mobile.de", "autoscout24", "kleinanzeigen", "ebay"];
-    // Safety check falls url null ist
     const safeUrl = url || "";
     const isValid = validDomains.some(domain => safeUrl.toLowerCase().includes(domain));
 
@@ -105,14 +96,13 @@ export default function Home() {
       const data = await res.json();
       setReport(data);
     } catch (err) {
-      console.error(err); // Fehler in Konsole loggen
-      setError(lang === "de" ? "Fehler bei der Analyse. Ist der Server online?" : "Analysis failed. Is the server running?");
+      console.error(err);
+      setError(lang === "de" ? "Fehler bei der Analyse. Mobile.de blockiert evtl. den Zugriff." : "Analysis failed. Mobile.de might be blocking.");
     } finally {
       setLoading(false);
     }
   };
 
-  // Sicheres Abrufen der Analysedaten
   const getAnalysisData = () => {
     if (!report || !report.analysis) return null;
     return report.analysis[lang] || report.analysis['de'] || report.analysis; 
@@ -120,46 +110,51 @@ export default function Home() {
 
   const analysis = getAnalysisData();
 
-  // --- BERECHNUNG (Sicher verpackt) ---
   let currentPrice = 0;
   let estimatedPrice = 0;
   let diff = 0;
   let displayEstimate = "---";
 
-  // Wir berechnen das nur, wenn Daten da sind
   if (report && analysis) {
       try {
           currentPrice = getSafeNumber(report?.data?.price);
           estimatedPrice = getSafeNumber(analysis?.market_price_estimate);
-
-          // Fallback Logik
-          if (estimatedPrice < 100 || estimatedPrice > 5000000) {
-              estimatedPrice = currentPrice;
-          }
-
+          if (estimatedPrice < 100 || estimatedPrice > 5000000) estimatedPrice = currentPrice;
           diff = currentPrice - estimatedPrice;
           displayEstimate = estimatedPrice.toLocaleString();
-      } catch (e) {
-          console.error("Berechnungsfehler", e);
-      }
+      } catch (e) {}
   }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
       
       {/* HEADER */}
-      <nav className="flex justify-between items-center p-6 max-w-5xl mx-auto">
+      <nav className="flex justify-between items-center p-4 md:p-6 max-w-5xl mx-auto">
         <div className="flex items-center gap-2 font-bold text-xl tracking-tight">
           <Gauge className="text-indigo-600" />
-          <span>{ui?.title || "Deal Anwalt"}</span>
+          <span className="hidden md:inline">{ui?.title || "Deal Anwalt"}</span>
         </div>
-        <button 
-          onClick={() => setLang(lang === "de" ? "en" : "de")}
-          className="flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-indigo-600 transition bg-white px-3 py-1 rounded-full border border-slate-200 shadow-sm"
-        >
-          <Globe size={14} />
-          {lang.toUpperCase()}
-        </button>
+
+        <div className="flex gap-3">
+            {/* TELEGRAM BUTTON */}
+            <a 
+              href={TELEGRAM_BOT_URL} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-sm font-bold text-white bg-blue-500 hover:bg-blue-600 transition px-4 py-2 rounded-full shadow-sm"
+            >
+              <Send size={14} />
+              {ui.telegramBtn}
+            </a>
+
+            <button 
+            onClick={() => setLang(lang === "de" ? "en" : "de")}
+            className="flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-indigo-600 transition bg-white px-3 py-2 rounded-full border border-slate-200 shadow-sm"
+            >
+            <Globe size={14} />
+            {lang.toUpperCase()}
+            </button>
+        </div>
       </nav>
 
       <main className="max-w-3xl mx-auto px-6 py-10 flex flex-col items-center">
@@ -218,7 +213,6 @@ export default function Home() {
         {report && !loading && analysis && (
           <div className="mt-12 w-full bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in zoom-in-95 duration-300">
             
-            {/* Bild */}
             <div className="relative h-64 bg-slate-100">
               {report?.meta?.image ? (
                 <img src={report.meta.image} alt="Car" className="w-full h-full object-cover" />
@@ -270,11 +264,21 @@ export default function Home() {
                     {ui?.ammo}
                   </h3>
                   <ul className="space-y-3 text-indigo-100 text-sm mb-6">
-                    {Array.isArray(analysis?.arguments) && analysis.arguments.map((arg: string, index: number) => (
-                      <li key={index} className="flex gap-2 items-start">
-                         <span className="mt-1 bg-indigo-500/50 p-1 rounded-full text-[10px]">➤</span> {arg}
-                      </li>
-                    ))}
+                    {Array.isArray(analysis?.arguments) && analysis.arguments.map((arg: string, index: number) => {
+                       // Schöne Icons für Argumente
+                       let icon = "➤";
+                       if (arg.includes("Depreciation")) icon = "📉";
+                       if (arg.includes("Equipment")) icon = "🛠";
+                       if (arg.includes("Market")) icon = "📊";
+                       // Text säubern
+                       const cleanText = arg.replace("Depreciation:", "").replace("Equipment:", "").replace("Market:", "");
+                       
+                       return (
+                          <li key={index} className="flex gap-2 items-start">
+                             <span className="mt-1 bg-indigo-500/50 p-1 rounded-full text-[10px]">{icon}</span> {cleanText}
+                          </li>
+                       );
+                    })}
                   </ul>
 
                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/10">
